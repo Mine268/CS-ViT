@@ -542,7 +542,7 @@ class Poser(nn.Module):
 
         # Temporal smoothness
         if (
-            self.training_phase == TI_DinoMANOPoser.TrainingPhase.TEMPORAL
+            self.training_phase == Poser.TrainingPhase.TEMPORAL
             and self.temporal_supervision == "full"
         ):
             velocity_pred = derivative(predict["joint_cam"], dim=1)  # [B,T,J-2,3]
