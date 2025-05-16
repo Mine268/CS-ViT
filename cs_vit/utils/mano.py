@@ -34,7 +34,7 @@ class MANO(object):
         }
         self.layer = {
             "right": smplx.create(
-                os.path.join(os.path.dirname(__file__), "../../smplx_models"),
+                os.path.join(os.path.dirname(__file__), "../../model/smplx_models"),
                 "mano",
                 is_rhand=True,
                 use_pca=False,
@@ -42,7 +42,7 @@ class MANO(object):
                 **self.layer_arg
             ),
             "left": smplx.create(
-                os.path.join(os.path.dirname(__file__), "../../smplx_models"),
+                os.path.join(os.path.dirname(__file__), "../../model/smplx_models"),
                 "mano",
                 is_rhand=False,
                 use_pca=False,

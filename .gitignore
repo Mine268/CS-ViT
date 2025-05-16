@@ -10,6 +10,7 @@ events.*
 *.pkl
 *.h5
 *.safetensors
+*.ipynb
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

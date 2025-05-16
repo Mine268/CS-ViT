@@ -1,4 +1,3 @@
-
 import argparse
 import datetime
 from typing import *
@@ -6,6 +5,7 @@ import os
 import json
 from copy import deepcopy
 
+import random
 import math
 import torch
 from torch.nn.parallel import DistributedDataParallel
@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import numpy as np
 
-from cs_vit.net import TI_DinoMANOPoser, warmup_scheduler
+from cs_vit.net import Poser, warmup_scheduler
 from cs_vit.dataset import InterHand26MSeq, HO3D
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
@@ -91,8 +91,8 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     )
 
     # 2. setup model
-    model = TI_DinoMANOPoser(
-        arch_config_path=cfg.backbone_arch,
+    model = Poser(
+        backbone=cfg.backbone,
         num_pose_query=cfg.num_joints,
         num_spatial_layer=cfg.num_spatial_layer,
         num_temporal_layer=cfg.num_temporal_layer,
@@ -101,16 +101,10 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         trope_scalar=cfg.trope_scalar,
         num_latent_layer=cfg.num_latent_layer,
     )
-    model.load_backbone_ckpt(cfg.backbone_ckpt)
-    model.phase(TI_DinoMANOPoser.TrainingPhase(cfg.phase))
+    model.phase(Poser.TrainingPhase(cfg.phase))
     if (cfg.phase == "temporal"):
         model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
     model.to(rank)
-    if False and cfg.lora_backbone > 0:
-        model = model.setup_lora_model(
-            ["query", "key", "value"],
-            cfg.lora_backbone
-        )
     model = DistributedDataParallel(
         model, device_ids=[rank], output_device=rank, find_unused_parameters=True
     )
@@ -331,10 +325,9 @@ if __name__ == "__main__":
         help="How the temporal outputs are supervised",
         choices=["full", "realtime"]
     )
-    parser.add_argument("--backbone_arch",type=str, required=True,
-        help="Path to config file of backbone architecture"
+    parser.add_argument("--backbone",type=str, required=True,
+        help="Backbone path (huggingface checkpoint)"
     )
-    parser.add_argument("--backbone_ckpt", type=str, required=True, help="Backbone checkpoint")
     parser.add_argument("--data", type=str, required=True, help="Dataset",
         choices=["interhand26m", "ho3d"]
     )
@@ -346,9 +339,6 @@ if __name__ == "__main__":
         help="Learning rate scheduler",
         choices=["warmup", "constant"]
     )
-    parser.add_argument("--lora_backbone", type=int, required=False, default=-1,
-        help="Toggle lora finetune for backbone"
-    )
 
     args = parser.parse_args()
     exp_name: str = args.exp
@@ -356,6 +346,7 @@ if __name__ == "__main__":
     cfg = deepcopy(default_finetune_cfg)
 
     ddp_setup()
+    random.seed(42)
     torch.manual_seed(42)
     np.random.seed(42)
     rank = get_rank()

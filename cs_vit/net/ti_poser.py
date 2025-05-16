@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 import smplx
-from transformers import ViTConfig
+import transformers
 from peft import LoraConfig, get_peft_model
 
 from .transformer_module import EncoderBlock, DecoderBlock, CrossAttnDecoder, ViTModelFromMAE
@@ -166,10 +166,8 @@ class PerspectiveEncoder(nn.Module):
         return z
 
 
-class TI_DinoMANOPoser(nn.Module):
-    """
-    Finetune TI_DinoViT with APLA approach
-    """
+class Poser(nn.Module):
+
     class TrainingPhase(Enum):
         SPATIAL = "spatial"
         TEMPORAL = "temporal"
@@ -177,72 +175,49 @@ class TI_DinoMANOPoser(nn.Module):
 
     def __init__(
         self,
-        arch_config_path: str = None,
+        backbone: str,
         num_pose_query: int = 16,
         num_spatial_layer: int = 6,
         num_temporal_layer: int = 2,
         expansion_ratio: float = 1.25,
         temporal_supervision: str = "full",
         trope_scalar: float = 20.0,
-        smplx_path: str = osp.join(osp.dirname(__file__), "../../smplx_models"),
-        image_size: int = 224,
-        num_latent_layer: int = 2,
+        num_latent_layer: Optional[int] = None,
+        smplx_path: str = osp.join(osp.dirname(__file__), "../../model/smplx_models"),
+        image_size: int = 256,
     ):
-        """
-        TI_DinoMANOPoser, assuming input image:
-            1. Shape=[3,H,W]
-            2. Channel=RGB
-            3. Pixel value in [0,1]
-
-        Args:
-            arch_config_path (str): Path to vit config json file.
-        """
         super().__init__()
 
-        self.arch_config_path = arch_config_path
+        self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
         self.num_spatial_layer = num_spatial_layer
         self.num_temporal_layer = num_temporal_layer
-        self.training_phase: TI_DinoMANOPoser.TrainingPhase = \
-            TI_DinoMANOPoser.TrainingPhase.INFERENCE
-        self.image_size = image_size
+        self.expansion_ratio = expansion_ratio
+        self.temporal_supervision = temporal_supervision
+        self.trope_scalar = trope_scalar
         self.num_latent_layer = num_latent_layer
+        self.smplx_path = smplx
+        self.image_size = image_size
 
-        # Image preprocess
+        self.training_phase: TI_DinoMANOPoser.TrainingPhase = Poser.TrainingPhase.INFERENCE
         self.image_preprocessor = transforms.Compose([
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], inplace=False
             )
         ])
 
-        # Backbone
-        self.backbone = TI_DinoViT(None, self.arch_config_path, image_size, False)
-
-        # Latent trans
-        self.trans_grp = ScaleRotComplexEmbedTransformationGroup(
-            num_layers=self.num_latent_layer,
-            embed_dim=self.backbone.embed_dim,
-            num_heads=self.backbone.num_attention_heads,
-            num_p=self.backbone.num_p,
-            num_q=self.backbone.num_p,
+        # backbone
+        self.backbone = transformers.AutoModel.from_pretrained(self.backbone_ckpt_dir)
+        self.hidden_dim = self.backbone.config.hidden_size
+        self.num_heads = (
+            self.backbone.config.num_heads[-1]
+            if isinstance(self.backbone.config.num_heads, list)
+            else self.backbone.config.num_heads
         )
-
-        # Hyperparams
-        self.embed_dim = self.backbone.embed_dim
-        self.num_heads = self.backbone.num_attention_heads
-        self.image_size = image_size
-        self.patch_size = self.backbone.patch_size
-        self.inv_patch_size: float = 1.0 / self.patch_size
-        self.num_patches_side: int = self.image_size // self.patch_size
-        self.num_patches: int = self.num_patches_side ** 2
-        self.expansion_ratio = expansion_ratio
-        self.temporal_supervision = temporal_supervision
-        self.trope_scalar = trope_scalar
 
         # SMPLX layer for right hand
         self.rmano_layer = smplx.create(smplx_path, "mano", is_rhand=True, use_pca=False)
-        for param in self.rmano_layer.parameters():
-            param.requires_grad_(False)
+        self.rmano_layer.requires_grad_(False)
         self.rmano_layer.eval()
 
         # Joint regressor matrix
@@ -254,22 +229,22 @@ class TI_DinoMANOPoser(nn.Module):
 
         # Query token for MANO params
         self.query_token = nn.Parameter(
-            data=torch.randn(size=(3, self.embed_dim)) * (1 / self.embed_dim**0.5)
+            data=torch.randn(size=(3, self.hidden_dim)) * (1 / self.hidden_dim**0.5)
         )  # query=pose+shape+cam
 
         # Perspective encoder
-        self.perspective_mlp = PerspectiveEncoder(self.patch_size ** 2, 2, self.embed_dim)
+        self.perspective_mlp = PerspectiveEncoder(16 ** 2, 2, self.hidden_dim)
 
         # Spatial encoder
         self.spatial_encoder = SpatialEncoder(
-            self.embed_dim,
+            self.hidden_dim,
             self.num_heads,
             self.num_spatial_layer
         )
 
         # Temporal encoder
         self.temporal_encoder = TemporalEncoder(
-            self.embed_dim,
+            self.hidden_dim,
             self.num_heads,
             self.num_temporal_layer,
             target=self.temporal_supervision,
@@ -278,48 +253,22 @@ class TI_DinoMANOPoser(nn.Module):
 
         # Pose FFN
         self.pose_decoder = nn.Sequential(
-            nn.Linear(self.embed_dim, self.num_pose_query * 6),  # 6d
+            nn.Linear(self.hidden_dim, self.num_pose_query * 6),  # 6d
         )
         self.shape_decoder = nn.Sequential(
-            nn.Linear(self.embed_dim, 10),
+            nn.Linear(self.hidden_dim, 10),
         )
         self.root_decoder = nn.Sequential(
-            nn.Linear(self.embed_dim, 3),
+            nn.Linear(self.hidden_dim, 3),
         )  # assuming output in meter
 
         # Training setup
         self.phase(TI_DinoMANOPoser.TrainingPhase.INFERENCE)
 
-    def load_backbone_ckpt(self, backbone_ckpt_path_or_pt: Union[str, Dict[str, torch.Tensor]]):
-        """
-        Load the backbone checkpoints.
-        """
-        if isinstance(backbone_ckpt_path_or_pt, str):
-            ckpt = torch.load(backbone_ckpt_path_or_pt)
-            self.backbone.backbone.load_state_dict(ckpt)
-        else:
-            self.backbone.load_state_dict(backbone_ckpt_path_or_pt)
-
-    def _setup_backbone_grad(self, method: str = "freeze"):
-        if method == "freeze":
-            self.backbone.eval()
-            self.backbone.requires_grad_(False)
-        elif method == "full":
-            self.backbone.train()
-            self.backbone.requires_grad_(True)
-        elif method == "apla":
-            self.backbone.eval()
-            self.backbone.requires_grad_(False)
-            for m in self.backbone.backbone.encoder.layer:
-                m.train()
-                m.attention.output.dense.weight.requires_grad_(True)
-        else:
-            raise NotImplementedError(f"unknown finetuning method {method}")
-
     def phase(self, phase):
         self.training_phase = phase
-        if self.training_phase == TI_DinoMANOPoser.TrainingPhase.SPATIAL:
-            self._setup_backbone_grad("full")
+        if self.training_phase == Poser.TrainingPhase.SPATIAL:
+            self.backbone.train()
             self.perspective_mlp.train()
             self.query_token.requires_grad_(True)
             self.spatial_encoder.train()
@@ -327,22 +276,21 @@ class TI_DinoMANOPoser(nn.Module):
             self.pose_decoder.train()
             self.shape_decoder.train()
             self.root_decoder.train()
-            self.trans_grp.train()
             for param in chain(
+                self.backbone.parameters(),
                 self.perspective_mlp.parameters(),
                 self.spatial_encoder.parameters(),
                 self.pose_decoder.parameters(),
                 self.shape_decoder.parameters(),
                 self.root_decoder.parameters(),
-                self.trans_grp.parameters(),
             ):
                 param.requires_grad_(True)
             for param in chain(
                 self.temporal_encoder.parameters()
             ):
                 param.requires_grad_(False)
-        elif self.training_phase == TI_DinoMANOPoser.TrainingPhase.TEMPORAL:
-            self._setup_backbone_grad("freeze")
+        elif self.training_phase == Poser.TrainingPhase.TEMPORAL:
+            self.backbone.eval()
             self.perspective_mlp.eval()
             self.query_token.requires_grad_(False)
             self.spatial_encoder.eval()
@@ -350,87 +298,69 @@ class TI_DinoMANOPoser(nn.Module):
             self.pose_decoder.eval()
             self.shape_decoder.eval()
             self.root_decoder.eval()
-            self.trans_grp.eval()
 
             for param in chain(
                 self.temporal_encoder.parameters()
             ):
                 param.requires_grad_(True)
             for param in chain(
+                self.backbone.parameters(),
                 self.perspective_mlp.parameters(),
                 self.spatial_encoder.parameters(),
                 self.pose_decoder.parameters(),
                 self.shape_decoder.parameters(),
                 self.root_decoder.parameters(),
-                self.trans_grp.parameters(),
             ):
                 param.requires_grad_(False)
-        elif self.training_phase == TI_DinoMANOPoser.TrainingPhase.INFERENCE:
+        elif self.training_phase == Poser.TrainingPhase.INFERENCE:
             self.eval()
             for param in self.parameters():
                 param.requires_grad_(False)
 
-    def extract_spatial_patches(self, x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    def _extract_spatial_patches(self, x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
         for module in self.spatial_encoder:
             x = module(x, ref)
         return x
 
-    def decode_pose_train(
+    def _decode_pose(
         self,
         imgs: torch.Tensor,
         timestamp: torch.Tensor,
-        persp_vec: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        persp_vec: torch.Tensor,
+    ):
         """
         Encode the images into MANO pose parameter.
 
         Args:
             imgs (torch.Tensor): Shape=[N,T,3,H,W]
+            timestamp (torch.Tensor): Shape=[N,T]. in ms
             persp_tokens (torch.Tensor): Shape=[N,T,P,Q,D=3]. Perspective vector map.
         """
         batch_size, num_frames, _, _, _= imgs.shape
-        device = imgs.device
-        dtype = imgs.dtype
         imgs = rearrange(imgs, "b t c h w -> (b t) c h w", b=batch_size, t=num_frames)
-
-        # No need to normalize the image, done by TI_DinoViT
         imgs_norm = self.image_preprocessor(imgs)
-
-        # Backbone: extract the features, keep the CLS token
-        patches = self.backbone.encode(imgs_norm)  # [bt,l=196,d]
-
-        # # apply trans
-        # scale_coef = (
-        #     torch.randn(size=(batch_size,), device=device, dtype=dtype).clamp(-0.3, 0.3)
-        #     + 1.0
-        # )
-        # angle_rad = (
-        #     torch.rand(size=(batch_size,), device=device, dtype=dtype) * 2 * torch.pi
-        # )
-        # patches trans
-        # patches_trans = self.trans_grp.do_sr(patches, scale_coef, angle_rad)
-        # TODO: persp_vec trans
+        patches = self.backbone(imgs_norm).last_hidden_state  # [bt,l=64,d]
 
         # Perspective feature encode
         # [bt,d]
-        persp_bias = self.perspective_mlp(rearrange(
-            persp_vec,
-            "b t p q d -> (b t) (p q d)"
-        ))
+        persp_bias = self.perspective_mlp(
+            rearrange(persp_vec, "b t p q d -> (b t) (p q d)")
+        )
 
         # Add persp bias to query_patches
         query_patches = self.query_token[None, ...].repeat(batch_size * num_frames, 1, 1)
         query_patches = query_patches + persp_bias[:, None, :]
 
         # Spatial fusion
-        # [2bt,J+2,d]
+        # [bt,J+2,d]
         patches_decode = self.spatial_encoder(query_patches, patches)
 
+        # Temporal fusion
         if self.training_phase in [
-            TI_DinoMANOPoser.TrainingPhase.INFERENCE, TI_DinoMANOPoser.TrainingPhase.TEMPORAL
+            Poser.TrainingPhase.INFERENCE, Poser.TrainingPhase.TEMPORAL
         ]:
             # Temporal fusion
-            # [2b(J+2),t,d]
+            # [b(J+2),t,d]
             patches_decode = rearrange(
                 patches_decode,
                 "(b t) q d -> (b q) t d",
@@ -463,52 +393,26 @@ class TI_DinoMANOPoser(nn.Module):
                 q=3,
             )
 
-        pose_patches = patches_decode[:, :, -3]  # [2b,t,d]
-        shape_patches = patches_decode[:, :, -2]  # [2b,t,d]
-        root_patches = patches_decode[:, :, -1]  # [2b,t,d]
+        pose_patches = patches_decode[:, :, -3]  # [b,t,d]
+        shape_patches = patches_decode[:, :, -2]  # [b,t,d]
+        root_patches = patches_decode[:, :, -1]  # [b,t,d]
 
-        # [2b,t,j,6]
+        # [b,t,j,6]
         pose_6d = rearrange(self.pose_decoder(pose_patches), "b t (j d) -> b t j d", d=6)
-        pose_aa = matrix_to_axis_angle(rotation_6d_to_matrix(pose_6d))  # [2b,t,j,3]
-        shape = self.shape_decoder(shape_patches)  # [2b,t,10]
-        root_transl_norm = self.root_decoder(root_patches)  # [2b,t,3]
+        pose_aa = matrix_to_axis_angle(rotation_6d_to_matrix(pose_6d))  # [b,t,j,3]
+        shape = self.shape_decoder(shape_patches)  # [b,t,10]
+        root_transl_norm = self.root_decoder(root_patches)  # [b,t,3]
 
-        # origin pose
-        pose_6d_orig = pose_6d[:batch_size]
-        pose_aa_orig = pose_aa[:batch_size]
-        shape_orig = shape[:batch_size]
-        root_transl_norm_orig = root_transl_norm[:batch_size]
+        return pose_aa, shape, root_transl_norm
 
-        # scale-rotate back
-        # pose_6d_back = pose_6d[batch_size:]
-        # pose_aa_back = pose_aa[batch_size:]
-        # shape_back = shape[batch_size:]
-        # root_transl_norm_back = root_transl_norm[batch_size:]
-
-        # rotation_mat_back = rotation_matrix_z(-angle_rad)
-        # pose_mat_back = axis_angle_to_matrix(pose_aa_back)
-        # pose_mat_back = torch.einsum(
-        #     "brk,btjkc->btjrc",
-        #     rotation_mat_back,
-        #     pose_mat_back
-        # )
-        # pose_aa_back = matrix_to_axis_angle(pose_mat_back)
-        # root_transl_norm_back = torch.einsum(
-        #     "brc,btc->btr",
-        #     rotation_mat_back,
-        #     root_transl_norm_back
-        # )
-
-        return pose_aa_orig, shape_orig, root_transl_norm_orig
-
-    def pose_fk(
+    def _pose_fk(
         self,
         pose_aa: torch.Tensor,
         shape: torch.Tensor,
         root_transl_norm: torch.Tensor,
     ):
         """Invoke MANO layer to get vertices and joints"""
-        B, T, J1, _ = pose_aa.shape
+        B, _, J1, _ = pose_aa.shape
         J2 = self.J_regressor_mano.shape[0]
         shape = rearrange(shape, "b t d -> (b t) d")
         pose_aa = rearrange(pose_aa, "b t j d -> (b t) (j d)")
@@ -549,45 +453,27 @@ class TI_DinoMANOPoser(nn.Module):
 
         return joint_cam, verts_cam, root_transl
 
-    def predict_batch_train(
+    def _sample_persp_dir_vec(
         self,
-        patch_tensor: torch.Tensor,
-        bbox_scale_coef: torch.Tensor,
-        square_bboxes: torch.Tensor,
-        timestamp: torch.Tensor,
+        num_sample: int,
+        bbox: torch.Tensor,
         focal: torch.Tensor,
         princpt: torch.Tensor,
     ):
         """
-        Predict on batch of image sequences.
-
         Args:
-            patch_tensor (Tensor): Fixed-size patches, input to the model. Shape is `(B,T,C,H,W)`, \
-                `H=W=self.image_size`.
-            bbox_scale_coef (Tensor): The ratio of square bbox and patch size. \
-                Ratio=`self.image_size`/`square_bbox_size`. Shape is `(B,T)`.
-            square_bboxes (Tensor): Square bbox bounding the hand, expanded by dataset class. \
-                Shape is `(B,T,4)`.
+            bbox (Tensor): `(B,T,4)` in xyxy
+            focal/princpt (Tensor): `(B,T,2)`
         """
-        # Crop the origin image
-        # [B,T,C,H,W]
-        img_tensor = patch_tensor
-        # [B,T]
-        bbox_scale_coef = bbox_scale_coef
-        # [B,T,4]
-        square_bboxes = square_bboxes
-
-        # Generate the perspective map
         grid = torch.linspace(
-            self.inv_patch_size * 0.5,
-            1 - self.inv_patch_size * 0.5,
-            self.patch_size,
-            device=img_tensor.device
+            1 / num_sample * 0.5, 1 - 1 / num_sample * 0.5, num_sample, device=bbox.device
         )  # [p]
-        x_grid = square_bboxes[:, :, 0:1] + \
-            (square_bboxes[:, :, 2:3] - square_bboxes[:, :, 0:1]) * grid[None, None, :]  # [B,T,p]
-        y_grid = square_bboxes[:, :, 1:2] + \
-            (square_bboxes[:, :, 3:4] - square_bboxes[:, :, 1:2]) * grid[None, None, :]  # [B,T,p]
+        x_grid = (
+            bbox[:, :, 0:1] + (bbox[:, :, 2:3] - bbox[:, :, 0:1]) * grid[None, None, :]
+        )  # [B,T,p]
+        y_grid = (
+            bbox[:, :, 1:2] + (bbox[:, :, 3:4] - bbox[:, :, 1:2]) * grid[None, None, :]
+        )  # [B,T,p]
         # [B,T,p,p,2]
         grid = torch.stack([
             x_grid[:, :, :, None].expand(-1, -1, -1, grid.shape[0]),
@@ -597,21 +483,40 @@ class TI_DinoMANOPoser(nn.Module):
         directions = torch.cat([directions, torch.ones_like(directions[..., :1])], dim=-1)
         directions = directions / torch.norm(directions, p="fro", dim=-1, keepdim=True)
         directions = directions[..., :2]  # [B,T,p,p,2] discard z value
+        return directions
+
+    def predict_batch(
+        self,
+        img_tensor: torch.Tensor,
+        square_bboxes: torch.Tensor,
+        timestamp: torch.Tensor,
+        focal: torch.Tensor,
+        princpt: torch.Tensor,
+    ):
+        """
+        Predict on batch of image sequences.
+
+        Args:
+            img_tensor (Tensor): Fixed-size patches, input to the model. Shape is `(B,T,C,H,W)`, \
+                `H=W=self.image_size`.
+            square_bboxes (Tensor): Square bbox bounding the hand, expanded by dataset class. \
+                Shape is `(B,T,4)`.
+            timestamp (Tensor): Timestamp of each image, shape is `(B,T)`, unit=ms.
+            focal/princpt (Tensor): Shape is `(B,T,2)`.
+        """
+        # Generate the perspective map
+        directions = self._sample_persp_dir_vec(16, square_bboxes, focal, princpt)
 
         # Esitmate the pose
-        # pose_aa, pose_6d: [B,T,J,3/6]
+        # pose_aa: [B,T,J,3]
         # shape, root_transl: [B,T,10/3]
-        pose_aa, shape, root_transl_norm = self.decode_pose_train(
+        pose_aa, shape, root_transl_norm = self._decode_pose(
             img_tensor,
             timestamp,
             directions,
         )
-
         # Forward the pose to joint position
-        joint_cam, verts_cam, root_transl = self.pose_fk(pose_aa, shape, root_transl_norm)
-        # joint_cam_back, verts_cam_back, root_transl_back = self.pose_fk(
-        #     pose_aa_back, shape_back, root_transl_norm_back
-        # )
+        joint_cam, verts_cam, root_transl = self._pose_fk(pose_aa, shape, root_transl_norm)
 
         return {
             "joint_cam": joint_cam,  # [B,T,J=21,3], in mm
@@ -620,19 +525,10 @@ class TI_DinoMANOPoser(nn.Module):
             "shape": shape,  # [B,T,10]
             "root_transl_norm": root_transl_norm,  # [B,T,3], relative
             "root_transl": root_transl,  # [B,T,3], mm
-            "back": None
-            # "back": {
-            #     "joint_cam": joint_cam_back,  # [B,T,J=21,3], in mm
-            #     "verts_cam": verts_cam_back,  # [B,T,V=778,3], in mm
-            #     "pose_aa": pose_aa_back,  # [B,T,J=16,3]
-            #     "shape": shape_back,  # [B,T,10]
-            #     "root_transl_norm": root_transl_norm_back,  # [B,T,3], relative
-            #     "root_transl": root_transl_back,  # [B,T,3], mm
-            # }
         }
 
-    def calculate_loss(self, predict, batch):
-        B, T = predict["joint_cam"].shape[:2]
+    def _criterion(self, predict, batch):
+        _, T = predict["joint_cam"].shape[:2]
         time_idx = list(range(T)) if self.temporal_supervision != "realtime" else [-1]
 
         # Joint loss
@@ -663,46 +559,7 @@ class TI_DinoMANOPoser(nn.Module):
 
         return loss_joint_cam, loss_shape, loss_vel, loss_accel, loss_temporal
 
-    def forward(
-        self,
-        batch: Dict[str, Union[Any, torch.Tensor]],
-    ):
-        """
-        Predict the pose from `batch` and compute the loss. \
-        For `batch` dictionary format, you can refer to InterHand26MSeq.py for exact info.
-        """
-        predict = self.predict_batch_train(
-            patch_tensor=batch["patches"],
-            bbox_scale_coef=batch["bbox_scale_coef"],
-            square_bboxes=batch["square_bboxes"],
-            timestamp=batch["timestamp"],
-            focal=batch["focal"],
-            princpt=batch["princpt"]
-        )
-
-        B, T = predict["joint_cam"].shape[:2]
-        time_idx = list(range(T)) if self.temporal_supervision != "realtime" else [-1]
-
-        # Loss
-        loss_joint_cam, loss_shape, loss_vel, loss_accel, loss_temporal = (
-            self.calculate_loss(predict, batch)
-        )
-        # Back loss
-        # (
-        #     loss_joint_cam_back,
-        #     loss_shape_back,
-        #     loss_vel_back,
-        #     loss_accel_back,
-        #     loss_temporal_back,
-        # ) = self.calculate_loss(predict["back"], batch)
-
-        # All loss
-        loss = (loss_joint_cam + loss_shape + loss_temporal)  # + 0.1 * (
-        #     loss_joint_cam_back + loss_shape_back + loss_temporal_back
-        # )
-
-        # Vis
-        # reproject the joint_cam back to image and compare with gt joint_img
+    def _vis(self, predict, batch):
         joint_reproj_pred_u = (
             batch["focal"][..., :1] * predict["joint_cam"][..., 0] +
             batch["princpt"][..., :1] * predict["joint_cam"][..., 2]
@@ -730,14 +587,35 @@ class TI_DinoMANOPoser(nn.Module):
         img_vis = draw_hands_on_image_batch(
             img_vis, joint_img_vis_pred, TARGET_JOINTS_CONNECTION, "red", "gray"
         )
+        return img_vis
 
+    def forward(self, batch):
+        # forward
+        predict = self.predict_batch(
+            img_tensor=batch["patches"],
+            square_bboxes=batch["square_bboxes"],
+            timestamp=batch["timestamp"],
+            focal=batch["focal"],
+            princpt=batch["princpt"]
+        )
+
+        # loss
+        loss_joint, loss_shape, loss_vel, loss_accel, loss_temporal = self._criterion(
+            predict, batch
+        )
+        loss = loss_joint + loss_shape + loss_temporal
+
+        # vis
+        img_vis = self._vis(predict, batch)
+
+        # return
         return {
             "loss": loss,
             "logs": {
                 "scalar": {
                     "total": loss.item(),
                     "global": {
-                        "global": loss_joint_cam.item(),
+                        "global": loss_joint.item(),
                     },
                     "shape": {
                         "shape": loss_shape.item(),
@@ -747,12 +625,6 @@ class TI_DinoMANOPoser(nn.Module):
                         "vel": loss_vel.item(),
                         "accel": loss_accel.item(),
                     },
-                    # "back": {
-                    #     "back": (loss_joint_cam_back + loss_shape_back + loss_temporal_back).item(),
-                    #     "joint": loss_joint_cam_back.item(),
-                    #     "shape": loss_shape_back.item(),
-                    #     "temporal": loss_temporal_back.item(),
-                    # }
                 },
                 "image": {
                     "img_reproj": img_vis,

@@ -12,8 +12,8 @@ from torchvision import transforms
 from turbojpeg import TurboJPEG
 
 from ...constants import *
-from ..utils.joint import reorder_joints
-from ..utils.img import crop_tensor_with_square_box
+from ...utils.joint import reorder_joints
+from ...utils.img import crop_tensor_with_square_box
 
 
 class InterHand26MSeq(Dataset):
