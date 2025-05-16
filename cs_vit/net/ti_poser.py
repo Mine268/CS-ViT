@@ -199,7 +199,7 @@ class Poser(nn.Module):
         self.smplx_path = smplx
         self.image_size = image_size
 
-        self.training_phase: TI_DinoMANOPoser.TrainingPhase = Poser.TrainingPhase.INFERENCE
+        self.training_phase = Poser.TrainingPhase.INFERENCE
         self.image_preprocessor = transforms.Compose([
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], inplace=False
@@ -263,7 +263,7 @@ class Poser(nn.Module):
         )  # assuming output in meter
 
         # Training setup
-        self.phase(TI_DinoMANOPoser.TrainingPhase.INFERENCE)
+        self.phase(Poser.TrainingPhase.INFERENCE)
 
     def phase(self, phase):
         self.training_phase = phase
