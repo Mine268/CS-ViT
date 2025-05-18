@@ -1,7 +1,4 @@
-from copy import deepcopy
 from typing import *
-from typeguard import typechecked
-import json
 from einops import rearrange
 import os.path as osp
 from enum import Enum
@@ -14,21 +11,18 @@ import torch.nn as nn
 from torchvision import transforms
 import smplx
 import transformers
-from peft import LoraConfig, get_peft_model
+import kornia.geometry.transform as K
 
-from .transformer_module import EncoderBlock, DecoderBlock, CrossAttnDecoder, ViTModelFromMAE
+from .transformer_module import EncoderBlock, DecoderBlock, CrossAttnDecoder
 from ..utils.geometry import (
     rotation_6d_to_matrix,
     matrix_to_axis_angle,
-    rotation_matrix_z,
-    axis_angle_to_matrix,
 )
 from ..utils.img import draw_hands_on_image_batch
 from ..utils.joint import mean_connection_length
 from ..constants import TARGET_JOINTS_CONNECTION
 from ..net.transformer_module import PositionalEncoding
 from ..net.latent_transformers import ScaleRotComplexEmbedTransformationGroup
-from .ti_vit import TI_DinoViT
 
 
 def derivative(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -154,8 +148,8 @@ class PerspectiveEncoder(nn.Module):
         self.proj = nn.Linear(patch_res * persp_dim, embed_dim)
         for _ in range(3):
             self.layer.extend([
-                nn.Linear(embed_dim, embed_dim, bias=True),
                 nn.BatchNorm1d(embed_dim, affine=True),
+                nn.Linear(embed_dim, embed_dim, bias=True),
                 nn.ReLU(),
             ])
         self.layer.append(nn.Linear(embed_dim, embed_dim))
@@ -581,6 +575,11 @@ class Poser(nn.Module):
             img_vis = torch.flip(img_vis, dims=[-1])
         joint_img_vis_pred = joint_reproj_pred[0].detach().cpu()  # [T,J,2]
         joint_img_vis_gt = batch["joint_img"][0].detach().cpu()
+        img_vis = K.rotate(
+            img_vis,
+            angle=batch["rot_rad"][0].cpu() / torch.pi * 180,
+            center=batch["princpt"][0].cpu()
+        )
         img_vis = draw_hands_on_image_batch(
             img_vis, joint_img_vis_gt, TARGET_JOINTS_CONNECTION, "green", "gray"
         )

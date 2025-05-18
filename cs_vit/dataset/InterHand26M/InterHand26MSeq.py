@@ -9,11 +9,13 @@ import numpy as np
 import torch
 from torch.utils.data.dataset import Dataset
 from torchvision import transforms
+import kornia.geometry.transform as K
 from turbojpeg import TurboJPEG
 
 from ...constants import *
 from ...utils.joint import reorder_joints
-from ...utils.img import crop_tensor_with_square_box
+from ...utils.img import crop_tensor_with_square_box, expand_bbox_square
+from ...utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
 
 
 class InterHand26MSeq(Dataset):
@@ -50,6 +52,19 @@ class InterHand26MSeq(Dataset):
 
         # transformes
         self.base_transform = transforms.ToTensor()
+        self.aug_transform = transforms.Compose([
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1
+            ),
+            transforms.RandomGrayscale(p=0.1),
+            transforms.RandomApply([
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+            ], p=0.2),
+            transforms.RandomSolarize(threshold=0.5, p=0.2)
+        ])
 
         # J_regressor
         self.J_regressor = torch.from_numpy(
@@ -149,14 +164,10 @@ class InterHand26MSeq(Dataset):
             annot_h5["annots"]["joint_cam"][in_group_ix:in_group_ix + self.num_frames]
         joint_rel: np.ndarray = \
             annot_h5["annots"]["joint_rel"][in_group_ix:in_group_ix + self.num_frames]
-        vertices_rel: np.ndarray = \
-            annot_h5["annots"]["vertices_rel"][in_group_ix:in_group_ix + self.num_frames]
         mano_pose: np.ndarray = \
             annot_h5["annots"]["mano_pose"][in_group_ix:in_group_ix + self.num_frames]
         mano_shape: np.ndarray = \
             annot_h5["annots"]["mano_shape"][in_group_ix:in_group_ix + self.num_frames]
-        root_bbox_cam_approx: np.ndarray = \
-            annot_h5["annots"]["root_bbox_cam_approx"][in_group_ix:in_group_ix + self.num_frames]
         focal: np.ndarray = \
             annot_h5["annots"]["focal"][in_group_ix:in_group_ix + self.num_frames]
         princpt: np.ndarray = \
@@ -171,10 +182,8 @@ class InterHand26MSeq(Dataset):
         joint_bbox_img_tensor = torch.from_numpy(joint_bbox_img)
         joint_cam_tensor = torch.from_numpy(joint_cam)
         joint_rel_tensor = torch.from_numpy(joint_rel)
-        vertices_rel_tensor = torch.from_numpy(vertices_rel)
         mano_pose_tensor = torch.from_numpy(mano_pose)
         mano_shape_tensor = torch.from_numpy(mano_shape)
-        root_bbox_cam_approx_tensor = torch.from_numpy(root_bbox_cam_approx)
         focal_tensor = torch.from_numpy(focal)
         princpt_tensor = torch.from_numpy(princpt)
         # convert to float32
@@ -183,10 +192,8 @@ class InterHand26MSeq(Dataset):
         joint_bbox_img_tensor = joint_bbox_img_tensor.float()
         joint_cam_tensor = joint_cam_tensor.float()
         joint_rel_tensor = joint_rel_tensor.float()
-        vertices_rel_tensor = vertices_rel_tensor.float()
         mano_pose_tensor = mano_pose_tensor.float()
         mano_shape_tensor = mano_shape_tensor.float()
-        root_bbox_cam_approx_tensor = root_bbox_cam_approx_tensor.float()
         focal_tensor = focal_tensor.float()
         princpt_tensor = princpt_tensor.float()
 
@@ -197,6 +204,7 @@ class InterHand26MSeq(Dataset):
                 img = self.jpeg_decoder.decode(f.read())
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = self.base_transform(img)
+            img = self.aug_transform(img)
             img_seq.append(img)
         img_seq = torch.stack(img_seq)  # [T,C,H,W]
 
@@ -212,20 +220,10 @@ class InterHand26MSeq(Dataset):
             joint_bbox_img_tensor[..., 0] = bbox_size[:, None, 0] - joint_bbox_img_tensor[..., 0]
             joint_cam_tensor[..., 0] *= -1
             joint_rel_tensor[..., 0] *= -1
-            vertices_rel_tensor[..., 0] *= -1
             mano_pose_tensor = mano_pose_tensor.reshape(-1, 16, 3)
             mano_pose_tensor[..., 1:] *= -1
             mano_pose_tensor = mano_pose_tensor.reshape(-1, 48)
-            root_bbox_cam_approx_tensor[:, 0] *= -1
             princpt_tensor[:, 0] = W - princpt_tensor[:, 0]
-
-        # Crop the image
-        patch_tensor, bbox_scale_coef, square_bboxes = crop_tensor_with_square_box(
-            img_seq,
-            bbox_tight_tensor,
-            self.expansion_ratio,
-            self.img_size
-        )
 
         # reorder the joints
         joint_img_tensor = reorder_joints(
@@ -240,28 +238,74 @@ class InterHand26MSeq(Dataset):
         joint_rel_tensor = reorder_joints(
             joint_rel_tensor, IH26M_RJOINTS_ORDER, TARGET_JOINTS_ORDER
         )
-
         # Recalculate joint_rel
         joint_rel_tensor = joint_cam_tensor - joint_cam_tensor[:, :1]
-        # Recalculate vertices_rel
-        vertices_root = torch.einsum("tvd,jv->tjd", vertices_rel_tensor, self.J_regressor)[:, :1]
-        vertices_rel_tensor -= vertices_root
+
+        # rotation augmentation
+        rot_rad = torch.zeros(size=(img_seq.shape[0],))  # [T]
+        if self.data_split == "train":
+            rot_rad = torch.ones(size=(img_seq.shape[0],)) * torch.rand(size=(1,)) * 2 * torch.pi
+            rot_mat_3d = rotation_matrix_z(rot_rad)  # [T,3,3]
+            rot_mat_2d = rot_mat_3d[:, :2, :2].transpose(-1, -2)  # [T,2,2]
+            # rotate the 3D pose
+            joint_cam_tensor = joint_cam_tensor @ rot_mat_3d
+            joint_rel_tensor = joint_rel_tensor @ rot_mat_3d
+            root_pose = mano_pose_tensor[:, :3]
+            root_pose_mat = axis_angle_to_matrix(root_pose)  # [T,3,3]
+            root_pose_mat = rot_mat_3d.transpose(-1, -2) @ root_pose_mat
+            root_pose = matrix_to_axis_angle(root_pose_mat)  # [T,3]
+            mano_pose_tensor[:, :3] = root_pose
+            # rotate the 2D pose
+            joint_img_tensor = (  # [T,J,2]
+                joint_img_tensor - princpt_tensor[:, None]
+            ) @ rot_mat_2d.transpose(-1, -2) + princpt_tensor[:, None]
+            bbox_tight_tensor = torch.cat(  # [T,4], xyxy
+                [
+                    joint_img_tensor[:, :, 0].min(dim=1, keepdim=True).values,
+                    joint_img_tensor[:, :, 1].min(dim=1, keepdim=True).values,
+                    joint_img_tensor[:, :, 0].max(dim=1, keepdim=True).values,
+                    joint_img_tensor[:, :, 1].max(dim=1, keepdim=True).values,
+                ],
+                dim=-1
+            )
+            joint_bbox_img_tensor = joint_img_tensor - bbox_tight_tensor[:, None, :2]  # [T,J,2]
+            # rotate the image
+            square_bboxes = expand_bbox_square(bbox_tight_tensor, self.expansion_ratio)  # [T,4]
+            x1, y1, x2, y2 = square_bboxes.unbind(-1)  # each is [T]
+            square_corners = torch.stack([
+                torch.stack([x1, y1], dim=-1),
+                torch.stack([x2, y1], dim=-1),
+                torch.stack([x2, y2], dim=-1),
+                torch.stack([x1, y2], dim=-1),
+            ], dim=1)  # [T,4,2]
+            square_corners_orig = (
+                square_corners - princpt_tensor[:, None]
+            ) @ rot_mat_2d + princpt_tensor[:, None]  # [T,4,2]
+            patch_tensor = K.crop_and_resize(
+                img_seq, square_corners_orig, (self.img_size, self.img_size)
+            )
+        else:
+            # Crop the image
+            patch_tensor, _, square_bboxes = crop_tensor_with_square_box(
+                img_seq,
+                bbox_tight_tensor,
+                self.expansion_ratio,
+                self.img_size
+            )
 
         annot: Dict[str, torch.Tensor] = {
             "imgs_path": [osp.join(self.img_path, p) for p in img_path],  # List[str]
             "flip": handedness[0][0] == 'l',
+            "rot_rad": rot_rad,  # [T]
             "patches": patch_tensor,  # [T,C,H',W']
-            "bbox_scale_coef": bbox_scale_coef,  # [T]
             "square_bboxes": square_bboxes,  # [T,4]
             "bbox_tight": bbox_tight_tensor,  # [T,4]
             "joint_img": joint_img_tensor,  # [T,J,2]
             "joint_bbox_img": joint_bbox_img_tensor,  # [T,J,2]
             "joint_cam": joint_cam_tensor,  # [T,J,3]
             "joint_rel": joint_rel_tensor,  # [T,J,3]
-            "vertices_rel": vertices_rel_tensor,  # [T,V,3]
             "mano_pose": mano_pose_tensor,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape_tensor,  # [T,10]
-            "root_bbox_cam_approx": root_bbox_cam_approx_tensor,  # [T,3]
             "timestamp": torch.arange(start=0, end=self.num_frames) * 200,  # [T]
             "focal": focal_tensor,  # [T,2]
             "princpt": princpt_tensor,  # [T,2]

@@ -5,6 +5,7 @@ import random
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchvision.transforms.functional as VF
 import kornia
 
@@ -19,6 +20,86 @@ class RandomBlur:
             ksize = random.choice(range(3, self.max_kernel_size+1, 2))
             return VF.gaussian_blur(img, kernel_size=ksize)
         return img
+
+
+def expand_bbox_square(bboxes: torch.Tensor, expansion_ratio: float = 1.0) -> torch.Tensor:
+    """
+    Expand each bbox to square by padding its short side, then scale around center.
+    Args:
+        bboxes: Tensor[...,4] in (x1, y1, x2, y2) format
+        expansion_ratio: how much to scale the square (1.0=no extra padding)
+    Returns:
+        Tensor[...,4] expanded bboxes in (x1, y1, x2, y2)
+    """
+    # unpack coordinates
+    x1, y1, x2, y2 = bboxes.unbind(-1)
+    # compute width and height
+    w = x2 - x1
+    h = y2 - y1
+    # choose the longer side
+    max_side = torch.max(w, h)
+    # compute center coords
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+    # half side after making square and scaling
+    half_side = max_side * 0.5 * expansion_ratio
+    # reconstruct expanded square bbox
+    new_x1 = cx - half_side
+    new_y1 = cy - half_side
+    new_x2 = cx + half_side
+    new_y2 = cy + half_side
+    # pack and return
+    return torch.stack([new_x1, new_y1, new_x2, new_y2], dim=-1)
+
+
+def batch_rotate_expand(
+    imgs: torch.Tensor,
+    rads: torch.Tensor,
+    centers: torch.Tensor = None
+) -> torch.Tensor:
+    """
+    imgs: Tensor of shape [N,C,H,W]
+    centers: Tensor of shape [N,2], each in (x_center, y_center) coords
+    rads: Tensor of shape [N], rotation angles in radians
+    returns: Tensor of rotated-and-expanded images, list of [H'_i,W'_i]
+    """
+    N, C, H, W = imgs.shape
+    device = imgs.device
+    out_imgs = []
+    out_sizes = []
+    for i in range(N):
+        img = imgs[i:i+1]
+        cx, cy = centers[i]
+        theta = rads[i]
+        # compute new size
+        cos, sin = theta.cos(), theta.sin()
+        H_new = int((abs(H*cos) + abs(W*sin)).ceil().item())
+        W_new = int((abs(W*cos) + abs(H*sin)).ceil().item())
+        out_sizes.append((H_new, W_new))
+        # compute padding to center old image in new canvas
+        pad_left = int((W_new/2 - cx).floor().item())
+        pad_right = W_new - W - pad_left
+        pad_top = int((H_new/2 - cy).floor().item())
+        pad_bottom = H_new - H - pad_top
+        # pad img: (left, right, top, bottom)
+        img_padded = F.pad(img, [pad_left, pad_right, pad_top, pad_bottom])
+        # affine matrix: 2x3
+        # note: grid_sample expects normalized coords, but affine_grid handles that
+        A = torch.tensor([[cos, -sin, 0.0], [sin, cos, 0.0]], device=device)
+        A = A.unsqueeze(0)  # [1,2,3]
+        # create grid
+        grid = F.affine_grid(A, [1, C, H_new, W_new], align_corners=False)
+        # sample
+        out = F.grid_sample(img_padded, grid, align_corners=False)
+        out_imgs.append(out)
+    # stack with zero-padding to max size if needed
+    max_H = max(h for h, w in out_sizes)
+    max_W = max(w for h, w in out_sizes)
+    result = torch.zeros(N, C, max_H, max_W, device=device)
+    for i, out in enumerate(out_imgs):
+        h, w = out_sizes[i]
+        result[i, :, :h, :w] = out
+    return result
 
 
 def denormalize(

@@ -19,6 +19,7 @@ from cs_vit.net import Poser, warmup_scheduler
 from cs_vit.dataset import InterHand26MSeq, HO3D
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
+from cs_vit.utils.tensor import calculate_gradient_norm
 
 
 def nop(*a, **k):
@@ -106,7 +107,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
     model.to(rank)
     model = DistributedDataParallel(
-        model, device_ids=[rank], output_device=rank, find_unused_parameters=True
+        model, device_ids=[rank], output_device=rank, find_unused_parameters=False
     )
 
     # 3. optimizer
@@ -192,6 +193,7 @@ def train_one_epoch(
         loss = forward_result["loss"]
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         # lr update
@@ -225,6 +227,13 @@ def train_one_epoch(
                 summary_writer.add_scalar(
                     "train/lr",
                     optimizer.param_groups[0]["lr"],
+                    global_step=global_step,
+                )
+                # plot grad norm
+                grad_norm = calculate_gradient_norm(model.module)
+                summary_writer.add_scalar(
+                    "train/grad",
+                    grad_norm,
                     global_step=global_step,
                 )
 
@@ -290,12 +299,11 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         # dump checkpoints to file
         if rank == 0 and (epoch % 1 == 0 or epoch == end_epoch):
             print_(f"writing checkpoint for epoch {epoch}.")
-            model_cpu = deepcopy(model).cpu()
             torch.save(
                 {
                     "epoch": epoch,
-                    "model": model_cpu.module.state_dict(),
-                    "merged": model_cpu.module.state_dict(),
+                    "model": model.module.state_dict(),
+                    "merged": model.module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                 },
