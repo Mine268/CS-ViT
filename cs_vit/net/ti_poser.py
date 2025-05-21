@@ -54,27 +54,44 @@ class SpatialEncoder(nn.Module):
         embed_dim: int,
         num_heads: int,
         num_layer: int,
+        layer_type: str = "decoder"
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.num_layer = num_layer
+        self.layer_type = layer_type
 
         self.pe_spatial = PositionalEncoding(self.embed_dim, mode="absolute")
-        self.layers = nn.ModuleList([
-            DecoderBlock(self.embed_dim, self.num_heads) for _ in range(self.num_layer)
-        ])
+        if self.layer_type == "decoder":
+            self.layers = nn.ModuleList([
+                DecoderBlock(self.embed_dim, self.num_heads) for _ in range(self.num_layer)
+            ])
+        elif self.layer_type == "encoder":
+            self.layers = nn.ModuleList([
+                EncoderBlock(self.embed_dim, self.num_heads) for _ in range(self.num_layer)
+            ])
+        else:
+            raise NotImplementedError(f"unknown layer type: {self.layer_type}")
 
     def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x (Tensor): `(B,Q,D)`
             ctx (Tensor): `(B,L,D)`
+        Returns:
+            y (Tensor): `(B,Q,D)`
         """
-        x_embed = self.pe_spatial(x)
-        for module in self.layers:
-            x_embed = module(x_embed, ctx)
-        return x_embed
+        if self.layer_type == "decoder":
+            x_embed = self.pe_spatial(x)
+            for module in self.layers:
+                x_embed = module(x_embed, ctx)
+            return x_embed
+        elif self.layer_type == "encoder":
+            x_embed = self.pe_spatial(torch.cat([x, ctx], dim=1))  # [B,Q+L,D]
+            for module in self.layers:
+                x_embeb = module(x_embed)
+            return x_embeb[:, :x.shape[1]]
 
 
 class TemporalEncoder(nn.Module):
@@ -169,14 +186,17 @@ class Poser(nn.Module):
 
     def __init__(
         self,
+        # basic setup
         backbone: str,
         num_pose_query: int = 16,
         num_spatial_layer: int = 6,
+        spatial_layer_type: str = "decoder",
         num_temporal_layer: int = 2,
         expansion_ratio: float = 1.25,
         temporal_supervision: str = "full",
         trope_scalar: float = 20.0,
         num_latent_layer: Optional[int] = None,
+        persp_decorate: str = "query",
         smplx_path: str = osp.join(osp.dirname(__file__), "../../model/smplx_models"),
         image_size: int = 256,
     ):
@@ -185,11 +205,13 @@ class Poser(nn.Module):
         self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
         self.num_spatial_layer = num_spatial_layer
+        self.spatial_layer_type = spatial_layer_type
         self.num_temporal_layer = num_temporal_layer
         self.expansion_ratio = expansion_ratio
         self.temporal_supervision = temporal_supervision
         self.trope_scalar = trope_scalar
         self.num_latent_layer = num_latent_layer
+        self.persp_decorate = persp_decorate
         self.smplx_path = smplx
         self.image_size = image_size
 
@@ -233,7 +255,8 @@ class Poser(nn.Module):
         self.spatial_encoder = SpatialEncoder(
             self.hidden_dim,
             self.num_heads,
-            self.num_spatial_layer
+            self.num_spatial_layer,
+            self.spatial_layer_type,
         )
 
         # Temporal encoder
@@ -341,9 +364,12 @@ class Poser(nn.Module):
             rearrange(persp_vec, "b t p q d -> (b t) (p q d)")
         )
 
-        # Add persp bias to query_patches
+        # Init the query pathces
         query_patches = self.query_token[None, ...].repeat(batch_size * num_frames, 1, 1)
-        query_patches = query_patches + persp_bias[:, None, :]
+        if self.persp_decorate == "query":
+            query_patches = query_patches + persp_bias[:, None, :]
+        elif self.persp_decorate == "patch":
+            patches = patches + persp_bias[:, None, :]
 
         # Spatial fusion
         # [bt,J+2,d]
@@ -529,6 +555,10 @@ class Poser(nn.Module):
         loss_joint_cam = (
             predict["joint_cam"][:, time_idx] - batch["joint_cam"][:, time_idx]
         ).norm(p="fro", dim=-1).mean()
+        loss_joint_rel = (
+            (predict["joint_cam"][:, time_idx] - predict["joint_cam"][:, time_idx, :1]) -
+            (batch["joint_cam"][:, time_idx] - batch["joint_cam"][:, time_idx, :1])
+        ).norm(p="fro", dim=-1).mean()
         # Shape loss
         loss_shape = (
             predict["shape"][:, time_idx] - batch["mano_shape"][:, time_idx]
@@ -551,7 +581,7 @@ class Poser(nn.Module):
             loss_accel = torch.zeros_like(loss_shape)
             loss_temporal = torch.zeros_like(loss_shape)
 
-        return loss_joint_cam, loss_shape, loss_vel, loss_accel, loss_temporal
+        return loss_joint_cam, loss_joint_rel, loss_shape, loss_vel, loss_accel, loss_temporal
 
     def _vis(self, predict, batch):
         joint_reproj_pred_u = (
@@ -599,10 +629,15 @@ class Poser(nn.Module):
         )
 
         # loss
-        loss_joint, loss_shape, loss_vel, loss_accel, loss_temporal = self._criterion(
-            predict, batch
-        )
-        loss = loss_joint + loss_shape + loss_temporal
+        (
+            loss_joint_cam,
+            loss_joint_rel,
+            loss_shape,
+            loss_vel,
+            loss_accel,
+            loss_temporal,
+        ) = self._criterion(predict, batch)
+        loss = loss_joint_cam + loss_joint_rel + loss_shape + loss_temporal
 
         # vis
         img_vis = self._vis(predict, batch)
@@ -614,7 +649,9 @@ class Poser(nn.Module):
                 "scalar": {
                     "total": loss.item(),
                     "global": {
-                        "global": loss_joint.item(),
+                        "global": loss_joint_cam.item() + loss_joint_rel.item(),
+                        "cam": loss_joint_cam.item(),
+                        "rel": loss_joint_rel.item(),
                     },
                     "shape": {
                         "shape": loss_shape.item(),

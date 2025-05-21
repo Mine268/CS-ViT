@@ -10,7 +10,6 @@ import torch
 from torch.utils.data.dataset import Dataset
 from torchvision import transforms
 import kornia.geometry.transform as K
-from turbojpeg import TurboJPEG
 
 from ...constants import *
 from ...utils.joint import reorder_joints
@@ -28,7 +27,9 @@ class InterHand26MSeq(Dataset):
             if key in ["imgs_path", "flip"]:
                 collated_annot[key] = [sample[key] for sample in batch]
             else:
-                collated_annot[key] = torch.stack([sample[key] for sample in batch], dim=0)
+                collated_annot[key] = torch.stack(
+                    [sample[key].contiguous() for sample in batch], dim=0
+                )
         return collated_annot
 
     def __init__(
@@ -48,7 +49,6 @@ class InterHand26MSeq(Dataset):
         self.expansion_ratio = expansion_ratio
         self.img_path = osp.join(self.root, "images", data_split)
         self.annot_path = osp.join(self.root, "annotations", data_split)
-        self.jpeg_decoder = TurboJPEG()
 
         # transformes
         self.base_transform = transforms.ToTensor()
@@ -69,7 +69,7 @@ class InterHand26MSeq(Dataset):
         # J_regressor
         self.J_regressor = torch.from_numpy(
             np.load(osp.join(osp.dirname(__file__), "sh_joint_regressor.npy"))
-        )
+        ).float().contiguous()
 
         # load hdf5 file
         self.source_h5 = h5py.File(osp.join(self.annot_path, "seq.h5"))
@@ -187,21 +187,20 @@ class InterHand26MSeq(Dataset):
         focal_tensor = torch.from_numpy(focal)
         princpt_tensor = torch.from_numpy(princpt)
         # convert to float32
-        bbox_tight_tensor = bbox_tight_tensor.float()
-        joint_img_tensor = joint_img_tensor.float()
-        joint_bbox_img_tensor = joint_bbox_img_tensor.float()
-        joint_cam_tensor = joint_cam_tensor.float()
-        joint_rel_tensor = joint_rel_tensor.float()
-        mano_pose_tensor = mano_pose_tensor.float()
-        mano_shape_tensor = mano_shape_tensor.float()
-        focal_tensor = focal_tensor.float()
-        princpt_tensor = princpt_tensor.float()
+        bbox_tight_tensor = bbox_tight_tensor.float().contiguous()
+        joint_img_tensor = joint_img_tensor.float().contiguous()
+        joint_bbox_img_tensor = joint_bbox_img_tensor.float().contiguous()
+        joint_cam_tensor = joint_cam_tensor.float().contiguous()
+        joint_rel_tensor = joint_rel_tensor.float().contiguous()
+        mano_pose_tensor = mano_pose_tensor.float().contiguous()
+        mano_shape_tensor = mano_shape_tensor.float().contiguous()
+        focal_tensor = focal_tensor.float().contiguous()
+        princpt_tensor = princpt_tensor.float().contiguous()
 
         # load the images
         img_seq = []
         for path in img_path:
-            with open(osp.join(self.img_path, path), "rb") as f:
-                img = self.jpeg_decoder.decode(f.read())
+            img = cv2.imread(osp.join(self.img_path, path))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = self.base_transform(img)
             img = self.aug_transform(img)

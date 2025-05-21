@@ -115,7 +115,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         batch_size=cfg.batch_size,
         pin_memory=False,
         drop_last=False,
-        num_workers=16,
+        num_workers=4,
         sampler=DistributedSampler(dataset, shuffle=shuffle, drop_last=False),
         collate_fn=collate_fn
     )
@@ -269,13 +269,6 @@ if __name__ == "__main__":
     parser.add_argument("--phase", type=str, required=True, help="Training phase",
         choices=["spatial", "temporal", "inference"]
     )
-    parser.add_argument("--temporal_supervision", type=str, required=True,
-        help="How the temporal outputs are supervised",
-        choices=["full", "realtime"]
-    )
-    parser.add_argument("--backbone",type=str, required=True,
-        help="Backbone path (huggingface checkpoint)"
-    )
     parser.add_argument("--data", type=str, required=True, help="Dataset",
         choices=["interhand26m", "ho3d"]
     )
@@ -286,7 +279,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     exp_name: str = args.exp
 
+    # load from config
     cfg = deepcopy(default_finetune_cfg)
+    cfg.update(vars(args))
 
     ddp_setup()
     torch.manual_seed(42)

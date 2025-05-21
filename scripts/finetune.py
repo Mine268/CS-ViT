@@ -21,6 +21,8 @@ from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
 from cs_vit.utils.tensor import calculate_gradient_norm
 
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
 
 def nop(*a, **k):
     _, _ = a, k
@@ -84,9 +86,9 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=cfg.batch_size,
-        pin_memory=True,
+        pin_memory=False,
         drop_last=False,
-        num_workers=16,
+        num_workers=8,
         sampler=DistributedSampler(dataset, shuffle=shuffle, drop_last=False),
         collate_fn=collate_fn
     )
@@ -193,7 +195,7 @@ def train_one_epoch(
         loss = forward_result["loss"]
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
 
         # lr update
@@ -335,6 +337,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--backbone",type=str, required=True,
         help="Backbone path (huggingface checkpoint)"
+    )
+    parser.add_argument("--spatial_layer_type", type=str, required=False, default="decoder",
+        help="Type of spatial encoder layer",
+        choices=["decoder", "encoder"]
+    )
+    parser.add_argument("--persp_decorate", type=str, required=False, default="query",
+        help="Perpective embedding decoration approach",
+        choices=["query", "patch"]
     )
     parser.add_argument("--data", type=str, required=True, help="Dataset",
         choices=["interhand26m", "ho3d"]

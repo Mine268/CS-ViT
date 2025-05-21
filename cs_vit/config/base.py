@@ -13,11 +13,13 @@ class FinetuneConfig():
     backbone: str = field(default=None)
     num_joints: int = 16
     num_spatial_layer: int = 6
+    spatial_layer_type: str = "decoder"
     num_temporal_layer: int = 2
     img_size: int = 256
     expansion_ratio: float = 1.25
     trope_scalar: float = 20.0  # 20 ms -> 1 step
     num_latent_layer: int = 2
+    persp_decorate: str = "query"
 
     # Dataset
     data: str = field(default=None)
