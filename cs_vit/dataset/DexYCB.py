@@ -5,10 +5,13 @@ import numpy as np
 import h5py
 import cv2
 import torch
+import kornia.geometry.transform as K
 from torch.utils.data.dataset import Dataset
+from torchvision import transforms
 
 from ..utils.img import crop_tensor_with_square_box
-
+from cs_vit.utils.img import crop_tensor_with_square_box, expand_bbox_square
+from cs_vit.utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
 
 class DexYCB(Dataset):
     def __init__(
@@ -28,6 +31,20 @@ class DexYCB(Dataset):
         self.data_split = data_split
         self.img_size = img_size
         self.expansion_ratio = expansion_ratio
+
+        self.aug_transform = transforms.Compose([
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1
+            ),
+            transforms.RandomGrayscale(p=0.1),
+            transforms.RandomApply([
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+            ], p=0.2),
+            transforms.RandomSolarize(threshold=0.5, p=0.2)
+        ])
 
         self.mano_pca_comps = np.load(osp.join(osp.dirname(__file__), "mano_lr_pca.npz"))
         self.mano_pca_comps = {
@@ -119,15 +136,10 @@ class DexYCB(Dataset):
         imgs_orig = torch.stack([
             torch.from_numpy(img.astype(np.float32) / 255.).permute(2, 0, 1) for img in imgs_orig
         ])
-        patches, bbox_scale_coef, square_bboxes = crop_tensor_with_square_box(
-            imgs_orig,
-            bbox_tight,
-            self.expansion_ratio, self.img_size
-        )
 
         # MANO
         mano_pose = torch.from_numpy(
-            annot_h5["pose_m"][in_group_ix:in_group_ix + self.num_frames]
+            annot_h5["pose_m"][0:0 + self.num_frames]
         )[:, :48].float()
         mano_pose[:, 3:] = mano_pose[:, 3:] @ self.mano_pca_comps[handedness]
         mano_shape = torch.from_numpy(
@@ -135,11 +147,10 @@ class DexYCB(Dataset):
         ).float()[None, :].repeat(self.num_frames, 1)
 
         # flip
+        img_seq = imgs_orig
         if handedness == "left":
             _, _, _, W = imgs_orig.shape
-            patches = torch.flip(patches, dims=[-1])
-            square_bboxes[:, 0], square_bboxes[:, 2] = \
-                W - square_bboxes[:, 2], W - square_bboxes[:, 0]
+            img_seq = torch.flip(imgs_orig, dims=[-1,])
             bbox_tight[:, 0], bbox_tight[:, 2] = \
                 W - bbox_tight[:, 2], W - bbox_tight[:, 0]
             joint_img[:, :, 0] = W - joint_img[:, :, 0]
@@ -152,21 +163,73 @@ class DexYCB(Dataset):
             mano_pose = mano_pose.reshape(-1, 48)
             princpt[:, 0] = W - princpt[:, 0]
 
-        # joint order is the same as target
+        rot_rad = torch.zeros(size=(img_seq.shape[0],))
+        if self.data_split == "train":
+            rot_rad = torch.ones(size=(img_seq.shape[0],)) * torch.rand(size=(1,)) * 2 * torch.pi
+            rot_mat_3d = rotation_matrix_z(rot_rad)  # [T,3,3]
+            rot_mat_2d = rot_mat_3d[:, :2, :2].transpose(-1, -2)  # [T,2,2]
+            # rotate the 3D pose
+            joint_cam = joint_cam @ rot_mat_3d
+            joint_rel = joint_rel @ rot_mat_3d
+            root_pose = mano_pose[:, :3]
+            root_pose_mat = axis_angle_to_matrix(root_pose)  # [T,3,3]
+            root_pose_mat = rot_mat_3d.transpose(-1, -2) @ root_pose_mat
+            root_pose = matrix_to_axis_angle(root_pose_mat)  # [T,3]
+            mano_pose[:, :3] = root_pose
+            # rotate the 2D pose
+            joint_img= (  # [T,J,2]
+                joint_img - princpt[:, None]
+            ) @ rot_mat_2d.transpose(-1, -2) + princpt[:, None]
+            bbox_tight = torch.cat(  # [T,4], xyxy
+                [
+                    joint_img[:, :, 0].min(dim=1, keepdim=True).values,
+                    joint_img[:, :, 1].min(dim=1, keepdim=True).values,
+                    joint_img[:, :, 0].max(dim=1, keepdim=True).values,
+                    joint_img[:, :, 1].max(dim=1, keepdim=True).values,
+                ],
+                dim=-1
+            )
+            joint_bbox_img = joint_img - bbox_tight[:, None, :2]  # [T,J,2]
+            # rotate the image
+            square_bboxes = expand_bbox_square(bbox_tight, self.expansion_ratio)  # [T,4]
+            x1, y1, x2, y2 = square_bboxes.unbind(-1)  # each is [T]
+            square_corners = torch.stack([
+                torch.stack([x1, y1], dim=-1),
+                torch.stack([x2, y1], dim=-1),
+                torch.stack([x2, y2], dim=-1),
+                torch.stack([x1, y2], dim=-1),
+            ], dim=1)  # [T,4,2]
+            square_corners_orig = (
+                square_corners - princpt[:, None]
+            ) @ rot_mat_2d + princpt[:, None]  # [T,4,2]
+            patch = K.crop_and_resize(
+                img_seq, square_corners_orig, (self.img_size, self.img_size)
+            )
+            patch = self.aug_transform(patch)
+        else:
+            patch, _, square_bboxes = crop_tensor_with_square_box(
+                img_seq,
+                bbox_tight,
+                self.expansion_ratio,
+                self.img_size,
+            )
 
-        return {
-            "imgs_path": imgs_path,  # List[str;T]
-            "flip": handedness == "left",
-            "patches": patches,  # [T,C,H',W']
-            "bbox_scale_coef": bbox_scale_coef,  # [T]
+        annot = {
+            "imgs_path": [osp.join(self.root, p) for p in imgs_path],  # List[str]
+            "flip": handedness[0][0] == "l",
+            "rot_rad": rot_rad,  # [T]
+            "patches": patch,  # [T,C,H',W']
             "square_bboxes": square_bboxes,  # [T,4]
-            "bbox_tight": bbox_tight,  # [T,4] xyxy
+            "bbox_tight": bbox_tight,  # [T,4]
             "joint_img": joint_img,  # [T,J,2]
             "joint_bbox_img": joint_bbox_img,  # [T,J,2]
             "joint_cam": joint_cam,  # [T,J,3]
-            "joint_rel": joint_rel,
-            "mano_pose": mano_pose,  # [T,48]
+            "joint_rel": joint_rel,  # [T,J,3]
+            "mano_pose": mano_pose,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape,  # [T,10]
+            "timestamp": torch.arange(start=0, end=self.num_frames) * 33.333,  # [T]
             "focal": focal,  # [T,2]
-            "princpt": princpt,
+            "princpt": princpt,  # [T,2]
         }
+
+        return annot

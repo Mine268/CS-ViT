@@ -16,7 +16,7 @@ from torchvision.utils import make_grid
 import numpy as np
 
 from cs_vit.net import Poser, warmup_scheduler
-from cs_vit.dataset import InterHand26MSeq, HO3D
+from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
 from cs_vit.utils.tensor import calculate_gradient_norm
@@ -83,6 +83,17 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         )
         collate_fn = InterHand26MSeq.collate_fn
         shuffle = True
+    elif cfg.data == "dexycb":
+        dataset = DexYCB(
+            root=cfg.dexycb_root,
+            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+            protocol="s1",
+            data_split="train",
+            img_size=cfg.img_size,
+            expansion_ratio=cfg.expansion_ratio
+        )
+        collate_fn = InterHand26MSeq.collate_fn
+        shuffle=True
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=cfg.batch_size,
@@ -98,18 +109,20 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         backbone=cfg.backbone,
         num_pose_query=cfg.num_joints,
         num_spatial_layer=cfg.num_spatial_layer,
+        spatial_layer_type=cfg.spatial_layer_type,
         num_temporal_layer=cfg.num_temporal_layer,
         expansion_ratio=cfg.expansion_ratio,
         temporal_supervision=cfg.temporal_supervision,
         trope_scalar=cfg.trope_scalar,
         num_latent_layer=cfg.num_latent_layer,
+        persp_decorate=cfg.persp_decorate,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
     if (cfg.phase == "temporal"):
         model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
     model.to(rank)
     model = DistributedDataParallel(
-        model, device_ids=[rank], output_device=rank, find_unused_parameters=False
+        model, device_ids=[rank], output_device=rank, find_unused_parameters=True
     )
 
     # 3. optimizer
@@ -347,7 +360,7 @@ if __name__ == "__main__":
         choices=["query", "patch"]
     )
     parser.add_argument("--data", type=str, required=True, help="Dataset",
-        choices=["interhand26m", "ho3d"]
+        choices=["interhand26m", "ho3d", "dexycb"]
     )
     parser.add_argument("--seq_len", type=int, required=False, default=7, help="Sequence length")
     parser.add_argument("--batch_size", type=int, required=False, default=16)

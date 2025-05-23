@@ -28,6 +28,7 @@ class FinetuneConfig():
     # source
     ih26mseq_root: str = "/mnt/qnap/data/datasets/InterHand2.6M_5fps_batch1"
     ho3d_root: str = "/mnt/qnap/data/datasets/ho3d_v3/ho3d_v3"
+    dexycb_root: str = "/data_1/datasets_temp/dexycb"
 
     # Train
     phase: str = "inference"

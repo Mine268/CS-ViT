@@ -16,7 +16,7 @@ from torchvision.utils import make_grid
 import numpy as np
 
 from cs_vit.net import Poser, warmup_scheduler
-from cs_vit.dataset import InterHand26MSeq, HO3D
+from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
 
@@ -110,6 +110,17 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         )
         collate_fn = InterHand26MSeq.collate_fn
         shuffle = False
+    elif cfg.data == "dexycb":
+        dataset = DexYCB(
+            root=cfg.dexycb_root,
+            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+            protocol="s1",
+            data_split="test",
+            img_size=cfg.img_size,
+            expansion_ratio=cfg.expansion_ratio
+        )
+        collate_fn = InterHand26MSeq.collate_fn
+        shuffle=True
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=cfg.batch_size,
@@ -125,11 +136,13 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         backbone=cfg.backbone,
         num_pose_query=cfg.num_joints,
         num_spatial_layer=cfg.num_spatial_layer,
+        spatial_layer_type=cfg.spatial_layer_type,
         num_temporal_layer=cfg.num_temporal_layer,
         expansion_ratio=cfg.expansion_ratio,
         temporal_supervision=cfg.temporal_supervision,
         trope_scalar=cfg.trope_scalar,
         num_latent_layer=cfg.num_latent_layer,
+        persp_decorate=cfg.persp_decorate,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
     model.load_state_dict(torch.load(cfg.eval_ckpt, map_location="cpu")["merged"], strict=False)
@@ -215,6 +228,22 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             chunks=(1000, 21, 3),
             compression='gzip'
         )
+        h5file.create_dataset(
+            "joint_reproj_pred",
+            shape=(0, 21, 2),
+            maxshape=(None, 21, 2),
+            dtype='float32',
+            chunks=(1000, 21, 2),
+            compression='gzip'
+        )
+        h5file.create_dataset(
+            "joint_reproj_gt",
+            shape=(0, 21, 2),
+            maxshape=(None, 21, 2),
+            dtype='float32',
+            chunks=(1000, 21, 2),
+            compression='gzip'
+        )
 
     # 1. setup
     (_, _, _, dataloader, _, _, _, model) = setup(rank, cfg, print_)
@@ -224,7 +253,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     device = torch.device(f"cuda:{rank}")
     for _, batch_ in enumerate(tqdm(dataloader, ncols=100)):
         batch = move_to_device(deepcopy(batch_), device)
-        with torch.no_grad():
+        with torch.inference_mode():
             predict = model.module.predict_batch(
                 img_tensor=batch["patches"],
                 square_bboxes=batch["square_bboxes"],
@@ -237,14 +266,34 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         joint_cam_gt = batch["joint_cam"][:, -1]
         joint_cam_pred = predict["joint_cam"][:, -1]
 
+        # reproj
+        joint_reproj_pred_u = (
+            batch["focal"][..., :1] * predict["joint_cam"][..., 0] +
+            batch["princpt"][..., :1] * predict["joint_cam"][..., 2]
+        )
+        joint_reproj_pred_v = (
+            batch["focal"][..., 1:] * predict["joint_cam"][..., 1] +
+            batch["princpt"][..., 1:] * predict["joint_cam"][..., 2]
+        )
+        # [B,T,J=21,2]
+        joint_reproj_pred = torch.stack([joint_reproj_pred_u, joint_reproj_pred_v], dim=-1)
+        joint_reproj_pred = joint_reproj_pred / predict["joint_cam"][..., -1:]
+        joint_reproj_gt = batch["joint_img"]
+        joint_reproj_pred = joint_reproj_pred[:, -1]
+        joint_reproj_gt = joint_reproj_gt[:, -1]
+
         all_img_paths = gather_strings(img_path, rank, world_size)
         all_joint_cam_gt = gather_tensors(joint_cam_gt, rank, world_size)
         all_joint_cam_pred = gather_tensors(joint_cam_pred, rank, world_size)
+        all_joint_reproj_gt = gather_tensors(joint_reproj_gt, rank, world_size)
+        all_joint_reproj_pred = gather_tensors(joint_reproj_pred, rank, world_size)
 
         if rank == 0:
             img_paths_np = np.array(all_img_paths, dtype=object)
             gt_np = all_joint_cam_gt.detach().cpu().numpy().astype(np.float32)
             pred_np = all_joint_cam_pred.detach().cpu().numpy().astype(np.float32)
+            reproj_gt_np = all_joint_reproj_gt.detach().cpu().numpy().astype(np.float32)
+            reproj_pred_np = all_joint_reproj_pred.detach().cpu().numpy().astype(np.float32)
 
             current_size = h5file['img_paths'].shape[0]
             new_size = current_size + len(img_paths_np)
@@ -252,10 +301,14 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             h5file['img_paths'].resize((new_size,))
             h5file['joint_cam_gt'].resize((new_size, 21, 3))
             h5file['joint_cam_pred'].resize((new_size, 21, 3))
+            h5file['joint_reproj_gt'].resize((new_size, 21, 2))
+            h5file['joint_reproj_pred'].resize((new_size, 21, 2))
 
             h5file['img_paths'][current_size:new_size] = img_paths_np
             h5file['joint_cam_gt'][current_size:new_size, :] = gt_np
             h5file['joint_cam_pred'][current_size:new_size, :] = pred_np
+            h5file['joint_reproj_gt'][current_size:new_size, :] = reproj_gt_np
+            h5file['joint_reproj_pred'][current_size:new_size, :] = reproj_pred_np
         torch.distributed.barrier()
 
     torch.distributed.barrier()
@@ -269,8 +322,18 @@ if __name__ == "__main__":
     parser.add_argument("--phase", type=str, required=True, help="Training phase",
         choices=["spatial", "temporal", "inference"]
     )
+    parser.add_argument("--backbone", type=str, required=True,
+        help="Backbone path (huggingface checkpoint)"
+    )
+    parser.add_argument("--spatial_layer_type", type=str, required=True,
+        choices=["encoder", "decoder"]
+    )
+    parser.add_argument("--persp_decorate", type=str, required=False, default="query",
+        help="Perpective embedding decoration approach",
+        choices=["query", "patch"]
+    )
     parser.add_argument("--data", type=str, required=True, help="Dataset",
-        choices=["interhand26m", "ho3d"]
+        choices=["interhand26m", "ho3d", "dexycb"]
     )
     parser.add_argument("--seq_len", type=int, required=False, default=7, help="Sequence length")
     parser.add_argument("--batch_size", type=int, required=False, default=16)
