@@ -485,11 +485,12 @@ class Poser(nn.Module):
             pose_aa_trans = matrix_to_axis_angle(pose_mat_trans)  # [b,t,j,3]
             pose_aa[batch_size:] = pose_aa_trans
 
-            root_transl_norm[batch_size:] = torch.einsum(
+            root_transl_norm_new = torch.einsum(
                 "btk,btkc->btc",
                 root_transl_norm[batch_size:].clone(),
                 rot_z_mat.transpose(-1, -2)
-            )
+            ) / scale_coef[:, None, None]
+            root_transl_norm[batch_size:] = root_transl_norm_new
 
         return pose_aa, shape, root_transl_norm
 
@@ -716,7 +717,7 @@ class Poser(nn.Module):
         loss_trans, trans_dict = 0, {}
         if self.latent_trans is not None:
             loss_trans, trans_dict = self._criterion(predict_trans, batch)
-            loss += loss_trans
+            loss += 1e-2 * loss_trans
 
         # vis
         img_vis = self._vis(predict_origin, batch)
