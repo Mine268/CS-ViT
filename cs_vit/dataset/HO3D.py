@@ -7,11 +7,14 @@ import cv2
 import h5py
 import torch
 from torch.utils.data.dataset import Dataset
+import torchvision.transforms as transforms
+import kornia.geometry.transform as K
 import numpy as np
 
 from ..constants import *
 from ..utils.joint import reorder_joints
-from ..utils.img import crop_tensor_with_square_box
+from ..utils.img import crop_tensor_with_square_box, expand_bbox_square
+from ..utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
 
 
 class HO3D_FS(Dataset):
@@ -216,8 +219,22 @@ class HO3D(Dataset):
         self.img_size = img_size
         self.expansion_ratio = expansion_ratio
 
+        self.aug_transform = transforms.Compose([
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1
+            ),
+            transforms.RandomGrayscale(p=0.1),
+            transforms.RandomApply([
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
+            ], p=0.2),
+            transforms.RandomSolarize(threshold=0.5, p=0.2)
+        ])
+
         self.source_h5 = h5py.File(
-            osp.join(self.root, f"{self.data_split}_ho3d_seq_er1.25_img224.h5"), mode="r"
+            osp.join(self.root, f"{self.data_split}_ho3d_seq.h5"), mode="r"
         )
 
         self.seq_index = []
@@ -260,11 +277,11 @@ class HO3D(Dataset):
         annot_h5 = self.source_h5[seq_annot["path_h5"]]
 
         # extract annot from h5
-        imgs_path:List[str] = annot_h5["img_path"][in_group_ix:in_group_ix + self.num_frames]
+        imgs_path : List[str] = annot_h5["img_path"][in_group_ix:in_group_ix + self.num_frames]
         imgs_path = [osp.join(self.root, str(v, "utf8")) for v in imgs_path]
-        patches = torch.from_numpy(
-            annot_h5["patch"][in_group_ix : in_group_ix + self.num_frames]
-        ).float()
+        # patches = torch.from_numpy(
+        #     annot_h5["patch"][in_group_ix : in_group_ix + self.num_frames]
+        # ).float()
         bbox_tight = torch.from_numpy(
             annot_h5["bbox_tight"][in_group_ix : in_group_ix + self.num_frames]
         ).float()
@@ -305,9 +322,67 @@ class HO3D(Dataset):
         joint_cam = reorder_joints(joint_cam, HO3D_JOINTS_ORDER, TARGET_JOINTS_ORDER)
         joint_rel = reorder_joints(joint_rel, HO3D_JOINTS_ORDER, TARGET_JOINTS_ORDER)
 
+        # load imgs
+        img_seq = [cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB) for img_path in imgs_path]
+        img_seq = torch.stack([
+            torch.from_numpy(img.astype(np.float32) / 255.).permute(2, 0, 1) for img in img_seq
+        ])
+        # global aug
+        rot_rad = torch.zeros(size=(img_seq.shape[0],))
+        if self.data_split == "train":
+            rot_rad = torch.ones(size=(img_seq.shape[0],)) * torch.rand(size=(1,)) * 2 * torch.pi
+            rot_mat_3d = rotation_matrix_z(rot_rad)  # [T,3,3]
+            rot_mat_2d = rot_mat_3d[:, :2, :2].transpose(-1, -2)  # [T,2,2]
+            # rotate the 3D pose
+            joint_cam = joint_cam @ rot_mat_3d
+            joint_rel = joint_rel @ rot_mat_3d
+            root_pose = mano_pose[:, :3]
+            root_pose_mat = axis_angle_to_matrix(root_pose)  # [T,3,3]
+            root_pose_mat = rot_mat_3d.transpose(-1, -2) @ root_pose_mat
+            root_pose = matrix_to_axis_angle(root_pose_mat)  # [T,3]
+            mano_pose[:, :3] = root_pose
+            # rotate the 2D pose
+            joint_img= (  # [T,J,2]
+                joint_img - princpt[:, None]
+            ) @ rot_mat_2d.transpose(-1, -2) + princpt[:, None]
+            bbox_tight = torch.cat(  # [T,4], xyxy
+                [
+                    joint_img[:, :, 0].min(dim=1, keepdim=True).values,
+                    joint_img[:, :, 1].min(dim=1, keepdim=True).values,
+                    joint_img[:, :, 0].max(dim=1, keepdim=True).values,
+                    joint_img[:, :, 1].max(dim=1, keepdim=True).values,
+                ],
+                dim=-1
+            )
+            joint_bbox_img = joint_img - bbox_tight[:, None, :2]  # [T,J,2]
+            # rotate the image
+            square_bboxes = expand_bbox_square(bbox_tight, self.expansion_ratio)  # [T,4]
+            x1, y1, x2, y2 = square_bboxes.unbind(-1)  # each is [T]
+            square_corners = torch.stack([
+                torch.stack([x1, y1], dim=-1),
+                torch.stack([x2, y1], dim=-1),
+                torch.stack([x2, y2], dim=-1),
+                torch.stack([x1, y2], dim=-1),
+            ], dim=1)  # [T,4,2]
+            square_corners_orig = (
+                square_corners - princpt[:, None]
+            ) @ rot_mat_2d + princpt[:, None]  # [T,4,2]
+            patches = K.crop_and_resize(
+                img_seq, square_corners_orig, (self.img_size, self.img_size)
+            )
+            patches = self.aug_transform(patches)
+        else:
+            patches, _, square_bboxes = crop_tensor_with_square_box(
+                img_seq, bbox_tight, self.expansion_ratio, self.img_size
+            )
+
+        # assume all valid
+        joint_valid = torch.ones_like(joint_cam[:2])
+
         return {
             "imgs_path": imgs_path,  # List[str;T]
             "flip": False,  # all hands are right hand
+            "rot_rad": rot_rad,  # [T]
             "patches": patches,  # [T,C,H',W']
             "bbox_scale_coef": bbox_scale_coef,  # [T]
             "square_bboxes": square_bboxes,  # [T,4]
@@ -315,6 +390,7 @@ class HO3D(Dataset):
             "joint_img": joint_img,  # [T,J,2]
             "joint_bbox_img": joint_bbox_img,  # [T,J,2]
             "joint_cam": joint_cam,  # [T,J,3]
+            "joint_valid": joint_valid,  # [T,J]
             "joint_rel": joint_rel,  # [T,J,3]
             "mano_pose": mano_pose,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape,  # [T,10]

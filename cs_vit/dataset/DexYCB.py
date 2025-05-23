@@ -9,9 +9,9 @@ import kornia.geometry.transform as K
 from torch.utils.data.dataset import Dataset
 from torchvision import transforms
 
-from ..utils.img import crop_tensor_with_square_box
-from cs_vit.utils.img import crop_tensor_with_square_box, expand_bbox_square
-from cs_vit.utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
+from ..utils.img import crop_tensor_with_square_box, expand_bbox_square
+from ..utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
+
 
 class DexYCB(Dataset):
     def __init__(
@@ -214,6 +214,9 @@ class DexYCB(Dataset):
                 self.img_size,
             )
 
+        # assume all joint valid
+        joint_valid = torch.ones_like(joint_cam[:2])
+
         annot = {
             "imgs_path": [osp.join(self.root, p) for p in imgs_path],  # List[str]
             "flip": handedness[0][0] == "l",
@@ -224,6 +227,7 @@ class DexYCB(Dataset):
             "joint_img": joint_img,  # [T,J,2]
             "joint_bbox_img": joint_bbox_img,  # [T,J,2]
             "joint_cam": joint_cam,  # [T,J,3]
+            "joint_valid": joint_valid,  # [T,J]
             "joint_rel": joint_rel,  # [T,J,3]
             "mano_pose": mano_pose,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape,  # [T,10]

@@ -9,7 +9,7 @@
     "img_size": 256,
     "expansion_ratio": 1.25,
     "trope_scalar": 20.0,
-    "num_latent_layer": 1,
+    "num_latent_layer": 3,
     "persp_decorate": "patch",
     "data": "dexycb",
     "seq_len": 1,

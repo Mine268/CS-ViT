@@ -162,6 +162,8 @@ class InterHand26MSeq(Dataset):
             annot_h5["annots"]["joint_bbox_img"][in_group_ix:in_group_ix + self.num_frames]
         joint_cam: np.ndarray = \
             annot_h5["annots"]["joint_cam"][in_group_ix:in_group_ix + self.num_frames]
+        joint_valid: np.ndarray = \
+            annot_h5["annots"]["joint_valid"][in_group_ix:in_group_ix + self.num_frames]
         joint_rel: np.ndarray = \
             annot_h5["annots"]["joint_rel"][in_group_ix:in_group_ix + self.num_frames]
         mano_pose: np.ndarray = \
@@ -181,6 +183,7 @@ class InterHand26MSeq(Dataset):
         joint_img_tensor = torch.from_numpy(joint_img)
         joint_bbox_img_tensor = torch.from_numpy(joint_bbox_img)
         joint_cam_tensor = torch.from_numpy(joint_cam)
+        joint_valid_tensor = torch.from_numpy(joint_valid)
         joint_rel_tensor = torch.from_numpy(joint_rel)
         mano_pose_tensor = torch.from_numpy(mano_pose)
         mano_shape_tensor = torch.from_numpy(mano_shape)
@@ -191,6 +194,7 @@ class InterHand26MSeq(Dataset):
         joint_img_tensor = joint_img_tensor.float().contiguous()
         joint_bbox_img_tensor = joint_bbox_img_tensor.float().contiguous()
         joint_cam_tensor = joint_cam_tensor.float().contiguous()
+        joint_valid_tensor = joint_valid_tensor.float().contiguous()
         joint_rel_tensor = joint_rel_tensor.float().contiguous()
         mano_pose_tensor = mano_pose_tensor.float().contiguous()
         mano_shape_tensor = mano_shape_tensor.float().contiguous()
@@ -302,6 +306,7 @@ class InterHand26MSeq(Dataset):
             "joint_img": joint_img_tensor,  # [T,J,2]
             "joint_bbox_img": joint_bbox_img_tensor,  # [T,J,2]
             "joint_cam": joint_cam_tensor,  # [T,J,3]
+            "joint_valid": joint_valid_tensor,  # [T,J]
             "joint_rel": joint_rel_tensor,  # [T,J,3]
             "mano_pose": mano_pose_tensor,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape_tensor,  # [T,10]
