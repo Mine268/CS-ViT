@@ -4,6 +4,7 @@ import os
 from copy import deepcopy
 from tqdm import tqdm
 from datetime import datetime
+import json
 
 import h5py
 import math
@@ -319,23 +320,10 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="eval in gpu")
     parser.add_argument("--exp", type=str, required=True, help="Exp name")
-    parser.add_argument("--phase", type=str, required=True, help="Training phase",
-        choices=["spatial", "temporal", "inference"]
-    )
-    parser.add_argument("--backbone", type=str, required=True,
-        help="Backbone path (huggingface checkpoint)"
-    )
-    parser.add_argument("--spatial_layer_type", type=str, required=True,
-        choices=["encoder", "decoder"]
-    )
-    parser.add_argument("--persp_decorate", type=str, required=False, default="query",
-        help="Perpective embedding decoration approach",
-        choices=["query", "patch"]
-    )
     parser.add_argument("--data", type=str, required=True, help="Dataset",
         choices=["interhand26m", "ho3d", "dexycb"]
     )
-    parser.add_argument("--seq_len", type=int, required=False, default=7, help="Sequence length")
+    parser.add_argument("--seq_len", type=int, required=False, default=1, help="Sequence length")
     parser.add_argument("--batch_size", type=int, required=False, default=16)
     parser.add_argument("--eval_ckpt", type=str, required=True, help="Checkpoint to eval")
 
@@ -343,7 +331,10 @@ if __name__ == "__main__":
     exp_name: str = args.exp
 
     # load from config
-    cfg = deepcopy(default_finetune_cfg)
+    assert os.path.exists(f"./checkpoints/{exp_name}/config.json")
+    with open(f"./checkpoints/{exp_name}/config.json", "r") as f:
+        json_obj = json.loads(f.read())
+    cfg = FinetuneConfig(**json_obj)
     cfg.update(vars(args))
 
     ddp_setup()

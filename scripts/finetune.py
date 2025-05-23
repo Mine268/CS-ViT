@@ -116,6 +116,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         trope_scalar=cfg.trope_scalar,
         num_latent_layer=cfg.num_latent_layer,
         persp_decorate=cfg.persp_decorate,
+        image_size=cfg.img_size,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
     if (cfg.phase == "temporal"):
@@ -238,7 +239,7 @@ def train_one_epoch(
                     global_step=global_step,
                 )
                 del img_grid
-                # plto lr
+                # plot lr
                 summary_writer.add_scalar(
                     "train/lr",
                     optimizer.param_groups[0]["lr"],
@@ -348,8 +349,11 @@ if __name__ == "__main__":
         help="How the temporal outputs are supervised",
         choices=["full", "realtime"]
     )
-    parser.add_argument("--backbone",type=str, required=True,
+    parser.add_argument("--backbone", type=str, required=True,
         help="Backbone path (huggingface checkpoint)"
+    )
+    parser.add_argument("--num_latent_layer", type=int, required=False, default=None,
+        help="if -1, no latent constraints applied"
     )
     parser.add_argument("--spatial_layer_type", type=str, required=False, default="decoder",
         help="Type of spatial encoder layer",
@@ -389,6 +393,8 @@ if __name__ == "__main__":
         with open(f"./checkpoints/{exp_name}/config.json", "r") as f:
             json_obj = json.loads(f.read())
         cfg = FinetuneConfig(**json_obj)
+        # train new epoch if bigger
+        cfg.epoch = args.epoch
         print_("Config loaded from file")
     else:
         cfg.update(vars(args))

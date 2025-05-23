@@ -18,7 +18,7 @@ class FinetuneConfig():
     img_size: int = 256
     expansion_ratio: float = 1.25
     trope_scalar: float = 20.0  # 20 ms -> 1 step
-    num_latent_layer: int = 2
+    num_latent_layer: int = field(default=None)
     persp_decorate: str = "query"
 
     # Dataset

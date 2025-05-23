@@ -17,6 +17,7 @@ from .transformer_module import EncoderBlock, DecoderBlock, CrossAttnDecoder
 from ..utils.geometry import (
     rotation_6d_to_matrix,
     matrix_to_axis_angle,
+    axis_angle_to_matrix,
 )
 from ..utils.img import draw_hands_on_image_batch
 from ..utils.joint import mean_connection_length
@@ -202,6 +203,10 @@ class Poser(nn.Module):
     ):
         super().__init__()
 
+        assert (num_latent_layer is not None and persp_decorate == "patch") or (
+            num_latent_layer is None
+        )
+
         self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
         self.num_spatial_layer = num_spatial_layer
@@ -230,6 +235,19 @@ class Poser(nn.Module):
             if isinstance(self.backbone.config.num_heads, list)
             else self.backbone.config.num_heads
         )
+        self.num_p = self.image_size // 32  # swin-transformer
+
+        # latent transformer
+        if self.num_latent_layer is not None:
+            self.latent_trans = ScaleRotComplexEmbedTransformationGroup(
+                num_layers=self.num_latent_layer,
+                embed_dim=self.hidden_dim,
+                num_heads=self.num_heads,
+                num_p=self.num_p,
+                num_q=self.num_p
+            )
+        else:
+            self.latent_trans = None
 
         # SMPLX layer for right hand
         self.rmano_layer = smplx.create(smplx_path, "mano", is_rhand=True, use_pca=False)
@@ -346,7 +364,9 @@ class Poser(nn.Module):
         persp_vec: torch.Tensor,
     ):
         """
-        Encode the images into MANO pose parameter.
+        Encode the images into MANO pose parameter. If `self.latent_trans` is not `None`, latent
+        constraints will be applied. Prediction batch of `2N` will be returned, 0~N-1 for origin
+        predictions, N~2N-1 for predictions transformed in latent space.
 
         Args:
             imgs (torch.Tensor): Shape=[N,T,3,H,W]
@@ -354,6 +374,9 @@ class Poser(nn.Module):
             persp_tokens (torch.Tensor): Shape=[N,T,P,Q,D=3]. Perspective vector map.
         """
         batch_size, num_frames, _, _, _= imgs.shape
+        device = imgs.device
+        dtype = imgs.dtype
+        n = 1
         imgs = rearrange(imgs, "b t c h w -> (b t) c h w", b=batch_size, t=num_frames)
         imgs_norm = self.image_preprocessor(imgs)
         patches = self.backbone(imgs_norm).last_hidden_state  # [bt,l=64,d]
@@ -371,8 +394,26 @@ class Poser(nn.Module):
         elif self.persp_decorate == "patch":
             patches = patches + persp_bias[:, None, :]
 
+        # Apply latent trans if can
+        scale_coef = (
+            torch.randn(size=(batch_size,), device=device, dtype=dtype).clamp(-0.3, 0.3)
+            + 1.0
+        )
+        angle_rad = (
+            torch.rand(size=(batch_size,), device=device, dtype=dtype) * 2 * torch.pi
+        )
+        if self.latent_trans is not None:
+            patches_trans = self.latent_trans.do_sr(patches, scale_coef, angle_rad)
+            n = 2
+            # [2bt,l,d]
+            patches = torch.cat([patches, patches_trans], dim=0)
+            # [2bt,q,d]
+            query_patches = torch.cat([query_patches, query_patches], dim=0)
+            # [2bt,1]
+            timestamp = torch.cat([timestamp, timestamp], dim=0)
+
         # Spatial fusion
-        # [bt,J+2,d]
+        # [bt or 2bt,J+2,d]
         patches_decode = self.spatial_encoder(query_patches, patches)
 
         # Temporal fusion
@@ -380,10 +421,11 @@ class Poser(nn.Module):
             Poser.TrainingPhase.INFERENCE, Poser.TrainingPhase.TEMPORAL
         ]:
             # Temporal fusion
-            # [b(J+2),t,d]
+            # [b(J+2) or (2b)(J+2),t,d]
             patches_decode = rearrange(
                 patches_decode,
-                "(b t) q d -> (b q) t d",
+                "(n b t) q d -> (n b q) t d",
+                n=n,
                 b=batch_size,
                 t=num_frames,
                 q=3,
@@ -391,7 +433,7 @@ class Poser(nn.Module):
             if self.temporal_supervision == "full":
                 patches_decode = patches_decode + self.temporal_encoder(patches_decode)
             elif self.temporal_supervision == "realtime":
-                # repeat timestamp to align the (b q)
+                # repeat timestamp to align the (bq, t)
                 timestamp = torch.repeat_interleave(timestamp, repeats=3, dim=0)
                 # [(b q), t=1, d]
                 patches_decode = (
@@ -401,27 +443,53 @@ class Poser(nn.Module):
             # Decode to MANO params
             patches_decode = rearrange(
                 patches_decode,
-                "(b q) t d -> b t q d",
+                "(n b q) t d -> (n b) t q d",
+                n=n,
                 b=batch_size,
                 q=3,
             )
         else:
             patches_decode = rearrange(
                 patches_decode,
-                "(b t) q d -> b t q d",
+                "(n b t) q d -> (n b) t q d",
+                n=n,
                 b=batch_size,
                 q=3,
             )
 
-        pose_patches = patches_decode[:, :, -3]  # [b,t,d]
-        shape_patches = patches_decode[:, :, -2]  # [b,t,d]
-        root_patches = patches_decode[:, :, -1]  # [b,t,d]
+        pose_patches = patches_decode[:, :, -3]  # [b or 2b,t,d]
+        shape_patches = patches_decode[:, :, -2]  # [b or 2b,t,d]
+        root_patches = patches_decode[:, :, -1]  # [b or 2b,t,d]
 
-        # [b,t,j,6]
-        pose_6d = rearrange(self.pose_decoder(pose_patches), "b t (j d) -> b t j d", d=6)
-        pose_aa = matrix_to_axis_angle(rotation_6d_to_matrix(pose_6d))  # [b,t,j,3]
-        shape = self.shape_decoder(shape_patches)  # [b,t,10]
-        root_transl_norm = self.root_decoder(root_patches)  # [b,t,3]
+        # [b or 2b,t,j,6]
+        pose_6d = rearrange(
+            self.pose_decoder(pose_patches), "(n b) t (j d) -> (n b) t j d", n=n, d=6
+        )
+        pose_aa = matrix_to_axis_angle(rotation_6d_to_matrix(pose_6d))  # [b or 2b,t,j,3]
+        shape = self.shape_decoder(shape_patches)  # [b or 2b,t,10]
+        root_transl_norm = self.root_decoder(root_patches)  # [b or 2b,t,3]
+
+        # rotate back
+        if self.latent_trans is not None:
+            sin = torch.sin(-angle_rad)  # [b]
+            cos = torch.cos(-angle_rad)
+            rot_z_mat = torch.zeros(size=(batch_size, num_frames, 3, 3), device=device)
+            rot_z_mat[:, :, 0, 0] = cos[:, None]
+            rot_z_mat[:, :, 0, 1] = -sin[:, None]
+            rot_z_mat[:, :, 1, 0] = sin[:, None]
+            rot_z_mat[:, :, 1, 1] = cos[:, None]
+            rot_z_mat[:, :, 2, 2] = 1
+
+            pose_mat_trans = axis_angle_to_matrix(pose_aa[batch_size:].clone())  # [b,t,j,3,3]
+            pose_mat_trans = rot_z_mat[:, :, None] @ pose_mat_trans
+            pose_aa_trans = matrix_to_axis_angle(pose_mat_trans)  # [b,t,j,3]
+            pose_aa[batch_size:] = pose_aa_trans
+
+            root_transl_norm[batch_size:] = torch.einsum(
+                "btk,btkc->btc",
+                root_transl_norm[batch_size:].clone(),
+                rot_z_mat.transpose(-1, -2)
+            )
 
         return pose_aa, shape, root_transl_norm
 
@@ -581,7 +649,15 @@ class Poser(nn.Module):
             loss_accel = torch.zeros_like(loss_shape)
             loss_temporal = torch.zeros_like(loss_shape)
 
-        return loss_joint_cam, loss_joint_rel, loss_shape, loss_vel, loss_accel, loss_temporal
+        tb_dict = {
+            "cam": loss_joint_cam.item(),
+            "rel": loss_joint_rel.item(),
+            "shape": loss_shape.item(),
+            "loss_vel": loss_vel.item(),
+            "loss_accel": loss_accel.item(),
+        }
+
+        return loss_joint_cam + loss_joint_rel + loss_shape + loss_temporal, tb_dict
 
     def _vis(self, predict, batch):
         joint_reproj_pred_u = (
@@ -619,6 +695,7 @@ class Poser(nn.Module):
         return img_vis
 
     def forward(self, batch):
+        batch_size = batch["patches"].shape[0]
         # forward
         predict = self.predict_batch(
             img_tensor=batch["patches"],
@@ -628,19 +705,21 @@ class Poser(nn.Module):
             princpt=batch["princpt"]
         )
 
+        predict_origin = {k: v[:batch_size].clone() for k, v in predict.items()}
+        if self.latent_trans is not None:
+            predict_trans = {k: v[batch_size:].clone() for k, v in predict.items()}
+
         # loss
-        (
-            loss_joint_cam,
-            loss_joint_rel,
-            loss_shape,
-            loss_vel,
-            loss_accel,
-            loss_temporal,
-        ) = self._criterion(predict, batch)
-        loss = loss_joint_cam + loss_joint_rel + loss_shape + loss_temporal
+        loss_origin, origin_dict = self._criterion(predict_origin, batch)
+        loss = loss_origin
+
+        loss_trans, trans_dict = 0, {}
+        if self.latent_trans is not None:
+            loss_trans, trans_dict = self._criterion(predict_trans, batch)
+            loss += loss_trans
 
         # vis
-        img_vis = self._vis(predict, batch)
+        img_vis = self._vis(predict_origin, batch)
 
         # return
         return {
@@ -648,22 +727,11 @@ class Poser(nn.Module):
             "logs": {
                 "scalar": {
                     "total": loss.item(),
-                    "global": {
-                        "global": loss_joint_cam.item() + loss_joint_rel.item(),
-                        "cam": loss_joint_cam.item(),
-                        "rel": loss_joint_rel.item(),
-                    },
-                    "shape": {
-                        "shape": loss_shape.item(),
-                    },
-                    "temporal": {
-                        "temporal": loss_temporal.item(),
-                        "vel": loss_vel.item(),
-                        "accel": loss_accel.item(),
-                    },
+                    "origin": {"origin": loss_origin.item(), **origin_dict},
+                    "trans": {"trans": loss_trans.item(), **trans_dict},
                 },
                 "image": {
                     "img_reproj": img_vis,
-                }
-            }
+                },
+            },
         }
