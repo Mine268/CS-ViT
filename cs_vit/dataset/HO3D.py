@@ -210,7 +210,7 @@ class HO3D(Dataset):
         img_size: int = 224,
         expansion_ratio: float = 1.25
     ):
-        assert data_split in ["train", "evalution"]
+        assert data_split in ["train", "evaluation"]
         super().__init__()
 
         self.root = root

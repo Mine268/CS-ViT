@@ -101,11 +101,11 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         )
         collate_fn = InterHand26MSeq.collate_fn
         shuffle = False
-    elif cfg.data == "evaluation":
+    elif cfg.data == "ho3d":
         dataset = HO3D(
             root=cfg.ho3d_root,
             num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
-            data_split="train",
+            data_split="evaluation",
             img_size=cfg.img_size,
             expansion_ratio=cfg.expansion_ratio
         )
@@ -142,7 +142,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         expansion_ratio=cfg.expansion_ratio,
         temporal_supervision=cfg.temporal_supervision,
         trope_scalar=cfg.trope_scalar,
-        num_latent_layer=cfg.num_latent_layer,
+        num_latent_layer=None,  # cfg.num_latent_layer,
         persp_decorate=cfg.persp_decorate,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))

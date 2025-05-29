@@ -123,7 +123,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
     model.to(rank)
     model = DistributedDataParallel(
-        model, device_ids=[rank], output_device=rank, find_unused_parameters=True
+        model, device_ids=[rank], output_device=rank, find_unused_parameters=False
     )
 
     # 3. optimizer
