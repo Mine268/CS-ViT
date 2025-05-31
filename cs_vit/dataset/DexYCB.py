@@ -101,14 +101,15 @@ class DexYCB(Dataset):
         handedness = str(annot_h5["handedness"][0], "utf-8")
         joint_img = torch.from_numpy(
             annot_h5["joint_2d"][in_group_ix:in_group_ix + self.num_frames]
-        ).float()
+        ).float().contiguous()
         joint_cam = torch.from_numpy(
             annot_h5["joint_3d"][in_group_ix:in_group_ix + self.num_frames]
-        ).float() * 1e3  # meter to millimeter
+        ).float().contiguous() * 1e3  # meter to millimeter
         joint_rel = joint_cam - joint_cam[:, :1]
         intr = (
             torch.from_numpy(annot_h5["intrinsics"][:])
             .float()
+            .contiguous()
             .reshape(3, 3)[None, ...]
             .repeat(self.num_frames, 1, 1)
         )
@@ -140,11 +141,11 @@ class DexYCB(Dataset):
         # MANO
         mano_pose = torch.from_numpy(
             annot_h5["pose_m"][0:0 + self.num_frames]
-        )[:, :48].float()
+        )[:, :48].float().contiguous()
         mano_pose[:, 3:] = mano_pose[:, 3:] @ self.mano_pca_comps[handedness]
         mano_shape = torch.from_numpy(
             annot_h5["beta"][:]
-        ).float()[None, :].repeat(self.num_frames, 1)
+        ).float().contiguous()[None, :].repeat(self.num_frames, 1)
 
         # flip
         img_seq = imgs_orig

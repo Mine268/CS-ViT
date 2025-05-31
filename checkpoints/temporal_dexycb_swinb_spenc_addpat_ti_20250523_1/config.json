@@ -1,6 +1,6 @@
 {
     "exp": "temporal_dexycb_swinb_spenc_addpat_ti_20250523_1",
-    "epoch": 3,
+    "epoch": 10,
     "backbone": "model/microsoft/swinv2-base-patch4-window16-256",
     "num_joints": 16,
     "num_spatial_layer": 6,
@@ -13,7 +13,7 @@
     "persp_decorate": "patch",
     "data": "dexycb",
     "seq_len": 7,
-    "batch_size": 32,
+    "batch_size": 36,
     "ih26mseq_root": "/mnt/qnap/data/datasets/InterHand2.6M_5fps_batch1",
     "ho3d_root": "/mnt/qnap/data/datasets/ho3d_v3/ho3d_v3",
     "dexycb_root": "/data_1/datasets_temp/dexycb",

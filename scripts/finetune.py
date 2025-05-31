@@ -99,7 +99,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         batch_size=cfg.batch_size,
         pin_memory=False,
         drop_last=False,
-        num_workers=8,
+        num_workers=4,
         sampler=DistributedSampler(dataset, shuffle=shuffle, drop_last=False),
         collate_fn=collate_fn
     )
@@ -123,7 +123,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
     model.to(rank)
     model = DistributedDataParallel(
-        model, device_ids=[rank], output_device=rank, find_unused_parameters=False
+        model, device_ids=[rank], output_device=rank, find_unused_parameters=True
     )
 
     # 3. optimizer
@@ -200,17 +200,21 @@ def train_one_epoch(
 
     for it, batch_ in enumerate(dataloader):
         # move to device
-        batch = move_to_device(deepcopy(batch_), device)
+        # batch = move_to_device(deepcopy(batch_), device)
+        # del batch_
+        batch = move_to_device(batch_, device)
 
         # forward
-        forward_result = model(batch)
+        with torch.amp.autocast("cuda"):
+            forward_result = model(batch)
 
         # backward
         loss = forward_result["loss"]
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
         # lr update
         if in_step_scheduler is not None and in_step_scheduler:
@@ -266,6 +270,8 @@ def train_one_epoch(
                 print_=print_
             )
             start_log_time = datetime.datetime.now()
+
+        del batch, forward_result
 
     # lr update
     if in_step_scheduler is not None and not in_step_scheduler:
@@ -353,7 +359,7 @@ if __name__ == "__main__":
         help="Backbone path (huggingface checkpoint)"
     )
     parser.add_argument("--num_latent_layer", type=int, required=False, default=None,
-        help="if -1, no latent constraints applied"
+        help="if None, no latent constraints applied"
     )
     parser.add_argument("--spatial_layer_type", type=str, required=False, default="decoder",
         help="Type of spatial encoder layer",
