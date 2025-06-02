@@ -384,7 +384,6 @@ class HO3D(Dataset):
             "flip": False,  # all hands are right hand
             "rot_rad": rot_rad,  # [T]
             "patches": patches,  # [T,C,H',W']
-            "bbox_scale_coef": bbox_scale_coef,  # [T]
             "square_bboxes": square_bboxes,  # [T,4]
             "bbox_tight": bbox_tight,  # [T,4]
             "joint_img": joint_img,  # [T,J,2]

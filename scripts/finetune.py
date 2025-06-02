@@ -75,7 +75,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
                 expansion_ratio=cfg.expansion_ratio,
             )
         )
-    elif "ho3d" in cfg.data:
+    if "ho3d" in cfg.data:
         dataset_list.append(
             HO3D(
                 root=cfg.ho3d_root,
@@ -85,7 +85,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
                 expansion_ratio=cfg.expansion_ratio,
             )
         )
-    elif cfg.data == "dexycb":
+    if cfg.data == "dexycb":
         dataset_list.append(
             DexYCB(
                 root=cfg.dexycb_root,

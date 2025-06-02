@@ -1,5 +1,5 @@
 {
-    "exp": "sptial_ih26m-dexycb-ho3d_swint_spenc_addpat_ti_20250602_1",
+    "exp": "spatial_ih26m-dexycb-ho3d_swint_spenc_addpat_ti_20250602_1",
     "epoch": 10,
     "backbone": "model/microsoft/swinv2-base-patch4-window16-256",
     "num_joints": 16,
