@@ -139,10 +139,12 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         num_spatial_layer=cfg.num_spatial_layer,
         spatial_layer_type=cfg.spatial_layer_type,
         num_temporal_layer=cfg.num_temporal_layer,
+        temporal_init_method=cfg.temporal_init_method,
         expansion_ratio=cfg.expansion_ratio,
         temporal_supervision=cfg.temporal_supervision,
         trope_scalar=cfg.trope_scalar,
         num_latent_layer=None,  # cfg.num_latent_layer,
+        persp_embed_method=cfg.persp_embed_method,
         persp_decorate=cfg.persp_decorate,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))

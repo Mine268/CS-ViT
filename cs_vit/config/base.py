@@ -15,14 +15,16 @@ class FinetuneConfig():
     num_spatial_layer: int = 6
     spatial_layer_type: str = "decoder"
     num_temporal_layer: int = 2
+    temporal_init_method: str = "zero"
     img_size: int = 256
     expansion_ratio: float = 1.25
     trope_scalar: float = 20.0  # 20 ms -> 1 step
     num_latent_layer: int = field(default=None)
+    persp_embed_method: str = "dense"
     persp_decorate: str = "query"
 
     # Dataset
-    data: str = field(default=None)
+    data: List[str] = field(default=None)
     seq_len: int = field(default=None)
     batch_size: int = field(default=None)
     # source

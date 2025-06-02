@@ -102,7 +102,8 @@ class TemporalEncoder(nn.Module):
         num_heads: int,
         num_layer: int,
         target: str = "realtime",
-        trope_scalar: float = 20.0
+        trope_scalar: float = 20.0,
+        do_zero_init: bool = True,
     ):
         assert target in ["realtime", "full"]
 
@@ -128,7 +129,8 @@ class TemporalEncoder(nn.Module):
 
         self.zero_conv = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
 
-        self._init_weights()
+        if do_zero_init:
+            self._init_weights()
 
     def _init_weights(self):
         nn.init.zeros_(self.zero_conv.weight)
@@ -193,10 +195,12 @@ class Poser(nn.Module):
         num_spatial_layer: int = 6,
         spatial_layer_type: str = "decoder",
         num_temporal_layer: int = 2,
+        temporal_init_method: str = "zero",
         expansion_ratio: float = 1.25,
         temporal_supervision: str = "full",
         trope_scalar: float = 20.0,
         num_latent_layer: Optional[int] = None,
+        persp_embed_method: str = "dense",
         persp_decorate: str = "query",
         smplx_path: str = osp.join(osp.dirname(__file__), "../../model/smplx_models"),
         image_size: int = 256,
@@ -206,16 +210,22 @@ class Poser(nn.Module):
         assert (num_latent_layer is not None and persp_decorate == "patch") or (
             num_latent_layer is None
         )
+        assert spatial_layer_type in ["decoder", "encoder"]
+        assert temporal_supervision in ["full", "realtime"]
+        assert persp_embed_method in ["dense", "sparse"]
+        assert persp_decorate in ["query", "patch"]
 
         self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
         self.num_spatial_layer = num_spatial_layer
         self.spatial_layer_type = spatial_layer_type
         self.num_temporal_layer = num_temporal_layer
+        self.temporal_init_method = temporal_init_method
         self.expansion_ratio = expansion_ratio
         self.temporal_supervision = temporal_supervision
         self.trope_scalar = trope_scalar
         self.num_latent_layer = num_latent_layer
+        self.persp_embed_method = persp_embed_method
         self.persp_decorate = persp_decorate
         self.smplx_path = smplx
         self.image_size = image_size
@@ -267,7 +277,11 @@ class Poser(nn.Module):
         )  # query=pose+shape+cam
 
         # Perspective encoder
-        self.perspective_mlp = PerspectiveEncoder(16 ** 2, 2, self.hidden_dim)
+        if self.persp_embed_method == "dense":
+            self.perspective_mlp = PerspectiveEncoder(16 ** 2, 2, self.hidden_dim)
+        elif self.persp_embed_method == "sparse":
+            # 4 for four corners, 2 for pixel coordinate dimension
+            self.perspective_mlp = PerspectiveEncoder(4, 2, self.hidden_dim)
 
         # Spatial encoder
         self.spatial_encoder = SpatialEncoder(
@@ -284,6 +298,7 @@ class Poser(nn.Module):
             self.num_temporal_layer,
             target=self.temporal_supervision,
             trope_scalar=self.trope_scalar,
+            do_zero_init=(self.temporal_init_method == "zero")
         )
 
         # Pose FFN
@@ -371,7 +386,7 @@ class Poser(nn.Module):
         Args:
             imgs (torch.Tensor): Shape=[N,T,3,H,W]
             timestamp (torch.Tensor): Shape=[N,T]. in ms
-            persp_tokens (torch.Tensor): Shape=[N,T,P,Q,D=3]. Perspective vector map.
+            persp_tokens (torch.Tensor): Shape=[N,T,P,Q,D]. Perspective vector map.
         """
         batch_size, num_frames, _, _, _= imgs.shape
         device = imgs.device
@@ -594,7 +609,22 @@ class Poser(nn.Module):
             focal/princpt (Tensor): Shape is `(B,T,2)`.
         """
         # Generate the perspective map
-        directions = self._sample_persp_dir_vec(16, square_bboxes, focal, princpt)
+        if self.persp_embed_method == "dense":
+            directions = self._sample_persp_dir_vec(16, square_bboxes, focal, princpt)
+        elif self.persp_embed_method == "sparse":
+            um = (square_bboxes[:, :, 0] - princpt[:, :, 0]) / focal[:, :, 0]  # [B,T]
+            uM = (square_bboxes[:, :, 2] - princpt[:, :, 0]) / focal[:, :, 0]
+            vm = (square_bboxes[:, :, 1] - princpt[:, :, 1]) / focal[:, :, 1]
+            vM = (square_bboxes[:, :, 3] - princpt[:, :, 1]) / focal[:, :, 1]
+            tl = torch.stack([um, vm], dim=-1)  # [B,T,2]
+            tr = torch.stack([uM, vm], dim=-1)
+            dl = torch.stack([um, vM], dim=-1)
+            dr = torch.stack([uM, vM], dim=-1)
+            r0 = torch.cat([tl[:, :, None], tr[:, :, None]], dim=2)  # [B,T,2,2]
+            r1 = torch.cat([dl[:, :, None], dr[:, :, None]], dim=2)
+            # the var `directions` shares the same name as above, but has different meaning:
+            # normalized coordinate of four corners of square bounding box
+            directions = torch.cat([r0[:, :, None], r1[:, :, None]], dim=2)  # [B,T,2,2,2]
 
         # Esitmate the pose
         # pose_aa: [B,T,J,3]
@@ -621,13 +651,25 @@ class Poser(nn.Module):
         time_idx = list(range(T)) if self.temporal_supervision != "realtime" else [-1]
 
         # Joint loss
-        loss_joint_cam = (
-            predict["joint_cam"][:, time_idx] - batch["joint_cam"][:, time_idx]
-        ).norm(p="fro", dim=-1).mean()
-        loss_joint_rel = (
-            (predict["joint_cam"][:, time_idx] - predict["joint_cam"][:, time_idx, :1]) -
-            (batch["joint_cam"][:, time_idx] - batch["joint_cam"][:, time_idx, :1])
-        ).norm(p="fro", dim=-1).mean()
+        loss_joint_cam = torch.mean(
+            (predict["joint_cam"][:, time_idx] - batch["joint_cam"][:, time_idx]).norm(
+                p="fro", dim=-1
+            )
+            * batch["joint_valid"][:, time_idx]
+        )
+        loss_joint_rel = torch.mean(
+            (
+                (
+                    predict["joint_cam"][:, time_idx]
+                    - predict["joint_cam"][:, time_idx, :1]
+                )
+                - (
+                    batch["joint_cam"][:, time_idx]
+                    - batch["joint_cam"][:, time_idx, :1]
+                )
+            ).norm(p="fro", dim=-1)
+            * batch["joint_valid"][:, time_idx]
+        )
         # Shape loss
         loss_shape = (
             predict["shape"][:, time_idx] - batch["mano_shape"][:, time_idx]

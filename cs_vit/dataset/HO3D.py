@@ -377,7 +377,7 @@ class HO3D(Dataset):
             )
 
         # assume all valid
-        joint_valid = torch.ones_like(joint_cam[:2])
+        joint_valid = torch.ones(joint_cam.shape[:2])
 
         return {
             "imgs_path": imgs_path,  # List[str;T]

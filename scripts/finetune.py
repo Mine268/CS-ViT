@@ -9,6 +9,7 @@ import random
 import math
 import torch
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import ConcatDataset
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
@@ -63,45 +64,47 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         summary_writer = SummaryWriter(log_dir=f"./checkpoints/{cfg.exp}/tb_logs")
 
     # 1. init dataset
-    if cfg.data == "interhand26m":
-        dataset = InterHand26MSeq(
-            root=cfg.ih26mseq_root,
-            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
-            data_split="train",
-            img_size=cfg.img_size,
-            expansion_ratio=cfg.expansion_ratio,
+    dataset_list = []
+    if "interhand26m" in cfg.data:
+        dataset_list.append(
+            InterHand26MSeq(
+                root=cfg.ih26mseq_root,
+                num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+                data_split="train",
+                img_size=cfg.img_size,
+                expansion_ratio=cfg.expansion_ratio,
+            )
         )
-        collate_fn = InterHand26MSeq.collate_fn
-        shuffle = True
-    elif cfg.data == "ho3d":
-        dataset = HO3D(
-            root=cfg.ho3d_root,
-            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
-            data_split="train",
-            img_size=cfg.img_size,
-            expansion_ratio=cfg.expansion_ratio
+    elif "ho3d" in cfg.data:
+        dataset_list.append(
+            HO3D(
+                root=cfg.ho3d_root,
+                num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+                data_split="train",
+                img_size=cfg.img_size,
+                expansion_ratio=cfg.expansion_ratio,
+            )
         )
-        collate_fn = InterHand26MSeq.collate_fn
-        shuffle = True
     elif cfg.data == "dexycb":
-        dataset = DexYCB(
-            root=cfg.dexycb_root,
-            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
-            protocol="s1",
-            data_split="train",
-            img_size=cfg.img_size,
-            expansion_ratio=cfg.expansion_ratio
+        dataset_list.append(
+            DexYCB(
+                root=cfg.dexycb_root,
+                num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+                protocol="s1",
+                data_split="train",
+                img_size=cfg.img_size,
+                expansion_ratio=cfg.expansion_ratio,
+            )
         )
-        collate_fn = InterHand26MSeq.collate_fn
-        shuffle=True
+    dataset = ConcatDataset(datasets=dataset_list)
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=cfg.batch_size,
         pin_memory=False,
         drop_last=False,
         num_workers=4,
-        sampler=DistributedSampler(dataset, shuffle=shuffle, drop_last=False),
-        collate_fn=collate_fn
+        sampler=DistributedSampler(dataset, shuffle=True, drop_last=False),
+        collate_fn=InterHand26MSeq.collate_fn
     )
 
     # 2. setup model
@@ -111,10 +114,12 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         num_spatial_layer=cfg.num_spatial_layer,
         spatial_layer_type=cfg.spatial_layer_type,
         num_temporal_layer=cfg.num_temporal_layer,
+        temporal_init_method=cfg.temporal_init_method,
         expansion_ratio=cfg.expansion_ratio,
         temporal_supervision=cfg.temporal_supervision,
         trope_scalar=cfg.trope_scalar,
         num_latent_layer=cfg.num_latent_layer,
+        persp_embed_method=cfg.persp_embed_method,
         persp_decorate=cfg.persp_decorate,
         image_size=cfg.img_size,
     )
@@ -365,11 +370,22 @@ if __name__ == "__main__":
         help="Type of spatial encoder layer",
         choices=["decoder", "encoder"]
     )
+    parser.add_argument("--temporal_init_method", type=str, required=False, default="zero",
+        help="Initialization method for temporal layers",
+        choices=["zero", "random"]
+    )
+    parser.add_argument("--persp_embed_method", type=str, required=False, default="dense",
+        help=
+            "How the model produce PEE embeding vector. "
+            "dense: using perspective vector map. "
+            "sparse: using normalized coordiantes of four corners of bounding box",
+        choices=["dense", "sparse"]
+    )
     parser.add_argument("--persp_decorate", type=str, required=False, default="query",
         help="Perpective embedding decoration approach",
         choices=["query", "patch"]
     )
-    parser.add_argument("--data", type=str, required=True, help="Dataset",
+    parser.add_argument("--data", type=str, required=True, help="Dataset", nargs="+",
         choices=["interhand26m", "ho3d", "dexycb"]
     )
     parser.add_argument("--seq_len", type=int, required=False, default=7, help="Sequence length")

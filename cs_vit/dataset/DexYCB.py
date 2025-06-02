@@ -216,7 +216,7 @@ class DexYCB(Dataset):
             )
 
         # assume all joint valid
-        joint_valid = torch.ones_like(joint_cam[:2])
+        joint_valid = torch.ones(joint_cam.shape[:2])
 
         annot = {
             "imgs_path": [osp.join(self.root, p) for p in imgs_path],  # List[str]

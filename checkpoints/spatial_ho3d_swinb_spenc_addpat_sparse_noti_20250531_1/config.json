@@ -1,5 +1,5 @@
 {
-    "exp": "debug_ft",
+    "exp": "spatial_ho3d_swinb_spenc_addpat_sparse_noti_20250531_1",
     "epoch": 30,
     "backbone": "model/microsoft/swinv2-base-patch4-window16-256",
     "num_joints": 16,
@@ -11,7 +11,7 @@
     "expansion_ratio": 1.25,
     "trope_scalar": 20.0,
     "num_latent_layer": null,
-    "persp_embed_method": "dense",
+    "persp_embed_method": "sparse",
     "persp_decorate": "patch",
     "data": "ho3d",
     "seq_len": 1,
