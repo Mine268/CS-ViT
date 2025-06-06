@@ -75,6 +75,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
                 expansion_ratio=cfg.expansion_ratio,
             )
         )
+        print_("Added interhand26m")
     if "ho3d" in cfg.data:
         dataset_list.append(
             HO3D(
@@ -85,7 +86,8 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
                 expansion_ratio=cfg.expansion_ratio,
             )
         )
-    if cfg.data == "dexycb":
+        print_("Added ho3d")
+    if "dexycb" in cfg.data:
         dataset_list.append(
             DexYCB(
                 root=cfg.dexycb_root,
@@ -96,6 +98,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
                 expansion_ratio=cfg.expansion_ratio,
             )
         )
+        print_("Added dexycb")
     dataset = ConcatDataset(datasets=dataset_list)
     dataloader = DataLoader(
         dataset=dataset,
@@ -210,12 +213,14 @@ def train_one_epoch(
         batch = move_to_device(batch_, device)
 
         # forward
-        with torch.amp.autocast("cuda"):
-            forward_result = model(batch)
+        forward_result = model(batch)
 
         # backward
         loss = forward_result["loss"]
         optimizer.zero_grad(set_to_none=True)
+        if torch.isnan(loss):
+            print_("loss is nan, skipping this batch")
+            continue
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()

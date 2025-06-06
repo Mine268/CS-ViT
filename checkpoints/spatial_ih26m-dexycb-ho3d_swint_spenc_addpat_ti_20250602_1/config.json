@@ -19,7 +19,7 @@
         "ho3d"
     ],
     "seq_len": 1,
-    "batch_size": 45,
+    "batch_size": 32,
     "ih26mseq_root": "/mnt/qnap/data/datasets/InterHand2.6M_5fps_batch1",
     "ho3d_root": "/mnt/qnap/data/datasets/ho3d_v3/ho3d_v3",
     "dexycb_root": "/data_1/datasets_temp/dexycb",
