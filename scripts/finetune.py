@@ -105,7 +105,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         batch_size=cfg.batch_size,
         pin_memory=False,
         drop_last=False,
-        num_workers=4,
+        num_workers=24,
         sampler=DistributedSampler(dataset, shuffle=True, drop_last=False),
         collate_fn=InterHand26MSeq.collate_fn
     )
@@ -208,9 +208,9 @@ def train_one_epoch(
 
     for it, batch_ in enumerate(dataloader):
         # move to device
-        # batch = move_to_device(deepcopy(batch_), device)
-        # del batch_
-        batch = move_to_device(batch_, device)
+        batch = move_to_device(deepcopy(batch_), device)
+        del batch_
+        # batch = move_to_device(batch_, device)
 
         # forward
         forward_result = model(batch)

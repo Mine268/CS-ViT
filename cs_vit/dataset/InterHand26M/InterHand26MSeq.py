@@ -2,6 +2,7 @@ from typing import *
 import pickle as pkl
 import os.path as osp
 from pathlib import Path
+import gc
 
 import h5py
 import cv2
@@ -134,6 +135,7 @@ class InterHand26MSeq(Dataset):
     def __len__(self):
         return self.num_samples
 
+    @torch.no_grad()
     def __getitem__(self, ix) -> Dict[str, torch.Tensor]:
         """
         Return the annotations for sequence of images, we assume the image will contains one right
@@ -314,5 +316,7 @@ class InterHand26MSeq(Dataset):
             "focal": focal_tensor,  # [T,2]
             "princpt": princpt_tensor,  # [T,2]
         }
+
+        gc.collect()
 
         return annot

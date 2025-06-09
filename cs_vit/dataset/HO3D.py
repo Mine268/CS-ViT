@@ -1,6 +1,7 @@
 from typing import *
 import os
 import os.path as osp
+import gc
 
 import pickle as pkl
 import cv2
@@ -264,6 +265,7 @@ class HO3D(Dataset):
                 right = mid - 1
         return left
 
+    @torch.no_grad()
     def __getitem__(self, ix) -> Dict[str, torch.Tensor]:
         """
         All images in HO3D are right-handed.

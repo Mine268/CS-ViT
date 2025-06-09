@@ -292,7 +292,23 @@ class Poser(nn.Module):
         )
 
         # Temporal encoder
-        self.temporal_encoder = TemporalEncoder(
+        self.pose_temporal_encoder = TemporalEncoder(
+            self.hidden_dim,
+            self.num_heads,
+            self.num_temporal_layer,
+            target=self.temporal_supervision,
+            trope_scalar=self.trope_scalar,
+            do_zero_init=(self.temporal_init_method == "zero")
+        )
+        self.shape_temporal_encoder = TemporalEncoder(
+            self.hidden_dim,
+            self.num_heads,
+            self.num_temporal_layer,
+            target=self.temporal_supervision,
+            trope_scalar=self.trope_scalar,
+            do_zero_init=(self.temporal_init_method == "zero")
+        )
+        self.root_temporal_encoder = TemporalEncoder(
             self.hidden_dim,
             self.num_heads,
             self.num_temporal_layer,
@@ -322,7 +338,9 @@ class Poser(nn.Module):
             self.perspective_mlp.train()
             self.query_token.requires_grad_(True)
             self.spatial_encoder.train()
-            self.temporal_encoder.eval()
+            self.pose_temporal_encoder.eval()
+            self.shape_temporal_encoder.eval()
+            self.root_temporal_encoder.eval()
             self.pose_decoder.train()
             self.shape_decoder.train()
             self.root_decoder.train()
@@ -336,7 +354,9 @@ class Poser(nn.Module):
             ):
                 param.requires_grad_(True)
             for param in chain(
-                self.temporal_encoder.parameters()
+                self.pose_temporal_encoder.parameters(),
+                self.shape_temporal_encoder.parameters(),
+                self.root_temporal_encoder.parameters(),
             ):
                 param.requires_grad_(False)
         elif self.training_phase == Poser.TrainingPhase.TEMPORAL:
@@ -344,13 +364,17 @@ class Poser(nn.Module):
             self.perspective_mlp.eval()
             self.query_token.requires_grad_(False)
             self.spatial_encoder.eval()
-            self.temporal_encoder.train()
+            self.pose_temporal_encoder.train()
+            self.shape_temporal_encoder.train()
+            self.root_temporal_encoder.train()
             self.pose_decoder.eval()
             self.shape_decoder.eval()
             self.root_decoder.eval()
 
             for param in chain(
-                self.temporal_encoder.parameters()
+                self.pose_temporal_encoder.parameters(),
+                self.shape_temporal_encoder.parameters(),
+                self.root_temporal_encoder.parameters(),
             ):
                 param.requires_grad_(True)
             for param in chain(
@@ -439,26 +463,46 @@ class Poser(nn.Module):
             # [b(J+2) or (2b)(J+2),t,d]
             patches_decode = rearrange(
                 patches_decode,
-                "(n b t) q d -> (n b q) t d",
+                "(n b t) q d -> q (n b) t d",
                 n=n,
                 b=batch_size,
                 t=num_frames,
                 q=3,
             )
+            pose_patches_decode = patches_decode[0]
+            shape_patches_decode = patches_decode[1]
+            root_patches_decode = patches_decode[2]
             if self.temporal_supervision == "full":
-                patches_decode = patches_decode + self.temporal_encoder(patches_decode)
+                pose_patches_decode = pose_patches_decode + self.pose_temporal_encoder(
+                    pose_patches_decode
+                )
+                shape_patches_decode = shape_patches_decode + self.shape_temporal_encoder(
+                    shape_patches_decode
+                )
+                root_patches_decode = root_patches_decode + self.root_temporal_encoder(
+                    root_patches_decode
+                )
             elif self.temporal_supervision == "realtime":
                 # repeat timestamp to align the (bq, t)
-                timestamp = torch.repeat_interleave(timestamp, repeats=3, dim=0)
-                # [(b q), t=1, d]
-                patches_decode = (
-                    patches_decode[:, -1:] + self.temporal_encoder(patches_decode, timestamp)
+                # timestamp = torch.repeat_interleave(timestamp, repeats=3, dim=0)
+                # [(b), t=1, d]
+                pose_patches_decode = (
+                    pose_patches_decode[:, -1:] +
+                    self.pose_temporal_encoder(pose_patches_decode, timestamp)
+                )
+                shape_patches_decode = (
+                    shape_patches_decode[:, -1:] +
+                    self.shape_temporal_encoder(shape_patches_decode, timestamp)
+                )
+                root_patches_decode = (
+                    root_patches_decode[:, -1:] +
+                    self.root_temporal_encoder(root_patches_decode, timestamp)
                 )
 
             # Decode to MANO params
             patches_decode = rearrange(
-                patches_decode,
-                "(n b q) t d -> (n b) t q d",
+                torch.stack([pose_patches_decode, shape_patches_decode, root_patches_decode]),
+                "q (n b) t d -> (n b) t q d",
                 n=n,
                 b=batch_size,
                 q=3,

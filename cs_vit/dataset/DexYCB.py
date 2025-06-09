@@ -1,6 +1,7 @@
 from typing import *
 import os.path as osp
 import numpy as np
+import gc
 
 import h5py
 import cv2
@@ -83,6 +84,7 @@ class DexYCB(Dataset):
                 right = mid - 1
         return left
 
+    @torch.no_grad()
     def __getitem__(self, ix):
         """
         All images in HO3D are right-handed.
@@ -236,5 +238,7 @@ class DexYCB(Dataset):
             "focal": focal,  # [T,2]
             "princpt": princpt,  # [T,2]
         }
+
+        gc.collect()
 
         return annot
