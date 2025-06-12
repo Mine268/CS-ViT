@@ -105,7 +105,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         batch_size=cfg.batch_size,
         pin_memory=False,
         drop_last=False,
-        num_workers=24,
+        num_workers=8,
         sampler=DistributedSampler(dataset, shuffle=True, drop_last=False),
         collate_fn=InterHand26MSeq.collate_fn
     )
