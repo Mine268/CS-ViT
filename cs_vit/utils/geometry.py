@@ -40,6 +40,74 @@ def rotation_matrix_z(rad: torch.Tensor) -> torch.Tensor:
     return rot_mat
 
 
+def rotation_matrix_x(rad: torch.Tensor) -> torch.Tensor:
+    """
+    Generate rotation matrix that rotates around x-axis for `rad`.
+
+    The rotation matrix follows the right-hand rule: positive radians rotate counter-clockwise
+    when looking from the positive x-axis towards the origin.
+
+    Args:
+        rad (torch.Tensor): Radian for rotation, shape [b]
+
+    Returns:
+        torch.Tensor: Rotation matrices of shape [b,3,3]. These are left-multiplication matrices,
+            meaning for a column vector v, the rotated vector is R @ v.
+    """
+    # Get batch size
+    b = rad.shape[0]
+
+    # Create empty rotation matrix tensor
+    rot_mat = torch.zeros(b, 3, 3, device=rad.device, dtype=rad.dtype)
+
+    # Compute cos and sin values for all angles in the batch
+    cos_rad = torch.cos(rad)
+    sin_rad = torch.sin(rad)
+
+    # Fill in the rotation matrix values
+    rot_mat[:, 0, 0] = 1.0
+    rot_mat[:, 1, 1] = cos_rad
+    rot_mat[:, 1, 2] = -sin_rad
+    rot_mat[:, 2, 1] = sin_rad
+    rot_mat[:, 2, 2] = cos_rad
+
+    return rot_mat
+
+
+def rotation_matrix_y(rad: torch.Tensor) -> torch.Tensor:
+    """
+    Generate rotation matrix that rotates around y-axis for `rad`.
+
+    The rotation matrix follows the right-hand rule: positive radians rotate counter-clockwise
+    when looking from the positive y-axis towards the origin.
+
+    Args:
+        rad (torch.Tensor): Radian for rotation, shape [b]
+
+    Returns:
+        torch.Tensor: Rotation matrices of shape [b,3,3]. These are left-multiplication matrices,
+            meaning for a column vector v, the rotated vector is R @ v.
+    """
+    # Get batch size
+    b = rad.shape[0]
+
+    # Create empty rotation matrix tensor
+    rot_mat = torch.zeros(b, 3, 3, device=rad.device, dtype=rad.dtype)
+
+    # Compute cos and sin values for all angles in the batch
+    cos_rad = torch.cos(rad)
+    sin_rad = torch.sin(rad)
+
+    # Fill in the rotation matrix values
+    rot_mat[:, 0, 0] = sin_rad
+    rot_mat[:, 0, 2] = cos_rad
+    rot_mat[:, 1, 1] = 1.0
+    rot_mat[:, 2, 0] = cos_rad
+    rot_mat[:, 2, 2] = -sin_rad
+
+    return rot_mat
+
+
 def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
     """
     Converts 6D rotation representation by Zhou et al. [1] to rotation matrix

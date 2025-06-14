@@ -18,6 +18,8 @@ from ..utils.geometry import (
     rotation_6d_to_matrix,
     matrix_to_axis_angle,
     axis_angle_to_matrix,
+    rotation_matrix_x,
+    rotation_matrix_y,
 )
 from ..utils.img import draw_hands_on_image_batch
 from ..utils.joint import mean_connection_length
@@ -204,6 +206,7 @@ class Poser(nn.Module):
         persp_decorate: str = "query",
         smplx_path: str = osp.join(osp.dirname(__file__), "../../model/smplx_models"),
         image_size: int = 256,
+        global_positioning: str = "direct",
     ):
         super().__init__()
 
@@ -214,6 +217,7 @@ class Poser(nn.Module):
         assert temporal_supervision in ["full", "realtime"]
         assert persp_embed_method in ["dense", "sparse"]
         assert persp_decorate in ["query", "patch"]
+        assert global_positioning in ["direct", "orientation"]
 
         self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
@@ -227,8 +231,9 @@ class Poser(nn.Module):
         self.num_latent_layer = num_latent_layer
         self.persp_embed_method = persp_embed_method
         self.persp_decorate = persp_decorate
-        self.smplx_path = smplx
+        self.smplx_path = smplx_path
         self.image_size = image_size
+        self.global_positioning = global_positioning
 
         self.training_phase = Poser.TrainingPhase.INFERENCE
         self.image_preprocessor = transforms.Compose([
@@ -648,10 +653,17 @@ class Poser(nn.Module):
             img_tensor (Tensor): Fixed-size patches, input to the model. Shape is `(B,T,C,H,W)`, \
                 `H=W=self.image_size`.
             square_bboxes (Tensor): Square bbox bounding the hand, expanded by dataset class. \
-                Shape is `(B,T,4)`.
+                Shape is `(B,T,4)`, format in xyxy.
             timestamp (Tensor): Timestamp of each image, shape is `(B,T)`, unit=ms.
             focal/princpt (Tensor): Shape is `(B,T,2)`.
         """
+        # for baseline
+        if self.global_positioning == "orientation":
+            # move the hand to the center of the image princpt
+            square_bboxes_center = (square_bboxes[:, :, :2] + square_bboxes[:, :, 2:]) / 2.0
+            square_bboxes[:, :, :2] -= square_bboxes_center + princpt
+            square_bboxes[:, :, 2:] -= square_bboxes_center + princpt
+
         # Generate the perspective map
         if self.persp_embed_method == "dense":
             directions = self._sample_persp_dir_vec(16, square_bboxes, focal, princpt)
@@ -678,6 +690,25 @@ class Poser(nn.Module):
             timestamp,
             directions,
         )
+
+        # for baseline, oriente the pose and root
+        if self.global_positioning == "orientation":
+            v_half = (square_bboxes_center[:, :, 1] - princpt[:, :, 1]) / focal[:, :, 1]  # [B,T]
+            u_half = (square_bboxes_center[:, :, 0] - princpt[:, :, 0]) / focal[:, :, 0]
+            pitch_rad = torch.atan(v_half)  # [B,T]
+            roll_rad = torch.atan(u_half)
+            trans = rotation_matrix_y(roll_rad) @ rotation_matrix_x(pitch_rad)  # [B,T,3,3]
+
+            # root
+            root_transl_norm = torch.einsum("btnd,btd->btn", trans, root_transl_norm)
+
+            # pose
+            pose_root_aa = pose_aa[:, :, 0]  # [B,T,3]
+            pose_root_mat = axis_angle_to_matrix(pose_root_aa)  # [B,T,3,3]
+            pose_root_mat = trans @ pose_root_mat
+            pose_root_aa_oriented = matrix_to_axis_angle(pose_root_aa)  # [B,T,3]
+            pose_aa[:, :, 0] = pose_root_aa_oriented
+
         # Forward the pose to joint position
         joint_cam, verts_cam, root_transl = self._pose_fk(pose_aa, shape, root_transl_norm)
 

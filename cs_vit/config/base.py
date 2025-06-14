@@ -13,6 +13,7 @@ class FinetuneConfig():
     backbone: str = field(default=None)
     num_joints: int = 16
     num_spatial_layer: int = 6
+    global_positioning: str = "direct"
     spatial_layer_type: str = "decoder"
     num_temporal_layer: int = 2
     temporal_init_method: str = "zero"

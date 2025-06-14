@@ -368,6 +368,10 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, required=True,
         help="Backbone path (huggingface checkpoint)"
     )
+    parser.add_argument("--global_positioning", type=str, required=False,
+        help="Directly regress the global position, or by orientation",
+        choices=["direct", "orientation"]
+    )
     parser.add_argument("--num_latent_layer", type=int, required=False, default=None,
         help="if None, no latent constraints applied"
     )
