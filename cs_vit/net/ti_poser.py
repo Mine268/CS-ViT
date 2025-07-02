@@ -51,6 +51,25 @@ def derivative(x: torch.Tensor, dim: int) -> torch.Tensor:
     return (x[tuple(slice_next)] - x[tuple(slice_prev)]) / 2.0
 
 
+class AxisAngleLoss(nn.Module):
+    def __init__(self, lambda_a=1.0, lambda_b=0.5):
+        super().__init__()
+        self.lambda_a = lambda_a
+        self.lambda_b = lambda_b
+
+    def forward(self, pred, target):
+        """[b,t,j,d]"""
+        pred_angle = torch.norm(pred, p=2, dim=-1, keepdim=True)
+        pred_axis = pred / pred_angle
+        target_angle = torch.norm(target, p=2, dim=-1, keepdim=True)
+        target_axis = target / target_angle
+
+        angle_loss = torch.abs(pred_angle - target_angle).mean()
+        axis_loss = (1 - (pred_axis * target_axis).sum(-1).clamp(-1, 1)).mean()
+
+        return self.lambda_a * angle_loss + self.lambda_b * axis_loss
+
+
 class SpatialEncoder(nn.Module):
     def __init__(
         self,
@@ -333,6 +352,9 @@ class Poser(nn.Module):
             nn.Linear(self.hidden_dim, 3),
         )  # assuming output in meter
 
+        # Axis criterion
+        self.axis_angle_criterion = AxisAngleLoss()
+
         # Training setup
         self.phase(Poser.TrainingPhase.INFERENCE)
 
@@ -563,6 +585,7 @@ class Poser(nn.Module):
         pose_aa: torch.Tensor,
         shape: torch.Tensor,
         root_transl_norm: torch.Tensor,
+        is_norm: bool = True,
     ):
         """Invoke MANO layer to get vertices and joints"""
         B, _, J1, _ = pose_aa.shape
@@ -588,10 +611,13 @@ class Poser(nn.Module):
 
         # Denormalize root position
         # [B,T]
-        mean_length: torch.Tensor = mean_connection_length(joints_mano, TARGET_JOINTS_CONNECTION)
-        mean_length = 1e3 * rearrange(mean_length, "(b t) -> b t 1", b=B)  # [B,T,1], mm
-        root_transl = root_transl_norm * mean_length  # [B,T,3]
-        # Post-process of root translation, in mm
+        if is_norm:
+            mean_length: torch.Tensor = mean_connection_length(joints_mano, TARGET_JOINTS_CONNECTION)
+            mean_length = 1e3 * rearrange(mean_length, "(b t) -> b t 1", b=B)  # [B,T,1], mm
+            root_transl = root_transl_norm * mean_length  # [B,T,3]
+            # Post-process of root translation, in mm
+        else:
+            root_transl = root_transl_norm
 
         # [B,T,V,3]
         verts_cam = rearrange(
@@ -745,6 +771,21 @@ class Poser(nn.Module):
             ).norm(p="fro", dim=-1)
             * batch["joint_valid"][:, time_idx]
         )
+        # Vertices loss
+        with torch.no_grad():
+            # [B,T,V,3]
+            _, verts_cam_gt, _ = self._pose_fk(
+                pose_aa=rearrange(batch["mano_pose"], "b t (j d) -> b t j d", d=3),
+                shape=batch["mano_shape"],
+                root_transl_norm=batch["joint_cam"][:, :, 0],
+                is_norm=False
+            )
+        loss_verts_cam = (predict["verts_cam"] - verts_cam_gt).norm(dim=-1, p=2).mean()
+        # Axis angle loss
+        loss_axis_angle = self.axis_angle_criterion(
+            predict["pose_aa"],
+            rearrange(batch["mano_pose"], "b t (j d) -> b t j d", d=3),
+        )
         # Shape loss
         loss_shape = (
             predict["shape"][:, time_idx] - batch["mano_shape"][:, time_idx]
@@ -770,12 +811,22 @@ class Poser(nn.Module):
         tb_dict = {
             "cam": loss_joint_cam.item(),
             "rel": loss_joint_rel.item(),
+            "verts": loss_verts_cam.item(),
+            "aa": loss_axis_angle.item(),
             "shape": loss_shape.item(),
             "loss_vel": loss_vel.item(),
             "loss_accel": loss_accel.item(),
         }
 
-        return loss_joint_cam + loss_joint_rel + loss_shape + loss_temporal, tb_dict
+        return (
+            loss_joint_cam
+            + loss_joint_rel
+            + loss_verts_cam
+            + loss_axis_angle
+            + loss_shape
+            + loss_temporal,
+            tb_dict,
+        )
 
     def _vis(self, predict, batch):
         joint_reproj_pred_u = (
