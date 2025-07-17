@@ -1,7 +1,7 @@
 {
-    "exp": "debug_ft",
-    "epoch": 1,
-    "backbone": "./model/microsoft/swinv2-base-patch4-window16-256",
+    "exp": "temporal_ho3d_swinb_spenc_addpat_ti_20250707_1",
+    "epoch": 10,
+    "backbone": "model/microsoft/swinv2-base-patch4-window16-256",
     "num_joints": 16,
     "num_spatial_layer": 6,
     "global_positioning": "direct",
@@ -15,7 +15,7 @@
     "persp_embed_method": "dense",
     "persp_decorate": "patch",
     "data": [
-        "dexycb"
+        "ho3d"
     ],
     "seq_len": 7,
     "batch_size": 32,
@@ -24,8 +24,8 @@
     "dexycb_root": "/data_1/datasets_temp/dexycb",
     "phase": "temporal",
     "temporal_supervision": "realtime",
-    "spatial_ckpt": null,
-    "lr": 0.0002,
+    "spatial_ckpt": "checkpoints/spatial_ho3d_swinb_spenc_addpat_ti_20250702_1/checkpoint_30.pt",
+    "lr": 0.0001,
     "lr_min": 1e-06,
     "lr_scheduler": "constant",
     "warmup_epoch": 1,

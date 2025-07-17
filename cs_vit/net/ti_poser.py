@@ -749,7 +749,7 @@ class Poser(nn.Module):
 
     def _criterion(self, predict, batch):
         _, T = predict["joint_cam"].shape[:2]
-        time_idx = list(range(T)) if self.temporal_supervision != "realtime" else [-1]
+        time_idx = list(range(T)) if self.temporal_supervision != "full" else [-1]
 
         # Joint loss
         loss_joint_cam = torch.mean(
@@ -782,7 +782,7 @@ class Poser(nn.Module):
             )
         loss_verts_cam = (predict["verts_cam"] - verts_cam_gt).norm(dim=-1, p=2).mean()
         # Axis angle loss
-        loss_axis_angle = self.axis_angle_criterion(
+        loss_axis_angle = 100 * self.axis_angle_criterion(
             predict["pose_aa"],
             rearrange(batch["mano_pose"], "b t (j d) -> b t j d", d=3),
         )

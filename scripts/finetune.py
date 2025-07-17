@@ -127,8 +127,11 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         image_size=cfg.img_size,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
-    if (cfg.phase == "temporal"):
-        model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
+    if cfg.phase == "temporal":
+        if cfg.spatial_ckpt is not None:
+            model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
+        else:
+            print_(f"No checkpoint is set in temporal phase.")
     model.to(rank)
     model = DistributedDataParallel(
         model, device_ids=[rank], output_device=rank, find_unused_parameters=True
