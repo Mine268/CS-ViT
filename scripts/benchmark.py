@@ -89,10 +89,20 @@ def main(prediction: str):
         errors_pa.append(np.mean(np.sqrt(np.sum((gt[ix] - pred_align) ** 2, axis=-1))).item())
     mpjpe_pa = np.mean(errors_pa)
 
+    # X error
+    error_x = np.abs((gt - pred)[..., 0])  # [N,J]
+    mean_error_x = np.mean(error_x)
+    error_root_x = np.abs((gt - pred)[:, 0, 0])  # [N,J]
+    mean_error_root_x = np.mean(error_root_x)
+    # Y error
+    error_y = np.abs((gt - pred)[..., 1])  # [N,J]
+    mean_error_y = np.mean(error_y)
+    error_root_y = np.abs((gt - pred)[:, 0, 1])  # [N,J]
+    mean_error_root_y = np.mean(error_root_y)
     # Z error
-    error_z = (gt - pred)[..., 2]  # [N,J]
+    error_z = np.abs((gt - pred)[..., 2])  # [N,J]
     mean_error_z = np.mean(error_z)
-    error_root_z = (gt - pred)[:, 0, 2]  # [N,J]
+    error_root_z = np.abs((gt - pred)[:, 0, 2])  # [N,J]
     mean_error_root_z = np.mean(error_root_z)
 
     # PCKs
@@ -105,6 +115,10 @@ def main(prediction: str):
     print(f"mpjpe_rs: {mpjpe_rel.item()} mm")
     print(f"mpjpe_pa: {mpjpe_pa} mm")
     print("")
+    print(f"mean_error_x: {mean_error_x}")
+    print(f"mean_error_root_x: {mean_error_root_x}")
+    print(f"mean_error_y: {mean_error_y}")
+    print(f"mean_error_root_y: {mean_error_root_y}")
     print(f"mean_error_z: {mean_error_z}")
     print(f"mean_error_root_z: {mean_error_root_z}")
     print("")
