@@ -15,6 +15,11 @@ import numpy as np
 import torch
 from torchvision import transforms
 
+try:
+    import mediapipe as mp
+except Exception as e:
+    mp = None
+
 from cs_vit.net import Poser
 from cs_vit.config import FinetuneConfig
 from cs_vit.dataset.DexYCB import crop_tensor_with_square_box, expand_bbox_square
@@ -118,7 +123,13 @@ def preprocess_image(img_path: str, bbox: Optional[List[float]], cfg: FinetuneCo
     return patches, square_bboxes, img_rgb
 
 
-def visualize_and_save(img_rgb: np.ndarray, reproj_uv: np.ndarray, out_path: str):
+def visualize_and_save(
+    img_rgb: np.ndarray,
+    reproj_uv: np.ndarray,
+    out_path: str,
+    mediapipe_bbox: Optional[List[float]] = None,
+    mediapipe_handedness: Optional[str] = None,
+):
     """
     Draw joints and skeleton on the original image using the project's draw utility.
 
@@ -135,7 +146,68 @@ def visualize_and_save(img_rgb: np.ndarray, reproj_uv: np.ndarray, out_path: str
 
     vis = (vis_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
     vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+
+    # draw mediapipe bbox and handedness if provided
+    if mediapipe_bbox is not None:
+        x1, y1, x2, y2 = [int(round(v)) for v in mediapipe_bbox]
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color=(0, 255, 0), thickness=2)
+        if mediapipe_handedness is not None:
+            label = 'Left' if mediapipe_handedness == 'l' else 'Right'
+            # put text above the top-left corner of bbox
+            text = f"MP: {label}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            thickness = 2
+            text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+            text_w, text_h = text_size
+            text_x = max(0, x1)
+            text_y = max(text_h + 4, y1 - 4)
+            cv2.rectangle(vis, (text_x, text_y - text_h - 4), (text_x + text_w, text_y + 2), (0, 255, 0), -1)
+            cv2.putText(vis, text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness, cv2.LINE_AA)
+
     cv2.imwrite(out_path, vis)
+
+
+def detect_hand_with_mediapipe(img_path: str):
+    """
+    Detect a single hand in the image using MediaPipe Hands.
+    Returns: (bbox: [x1,y1,x2,y2], handedness: 'l'|'r') in pixel coords and label.
+    """
+    if mp is None:
+        raise RuntimeError(
+            "mediapipe is not available. Please install it (pip install mediapipe) to use automatic detection."
+        )
+
+    img_bgr = cv2.imread(img_path)
+    assert img_bgr is not None, f"Failed to read image: {img_path}"
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    H, W = img_rgb.shape[:2]
+
+    hands = mp.solutions.hands
+    with hands.Hands(static_image_mode=True, max_num_hands=1, min_detection_confidence=0.5) as h:
+        results = h.process(img_rgb)
+        if not results.multi_hand_landmarks or not results.multi_handedness:
+            return None, None
+
+        lms = results.multi_hand_landmarks[0]
+        xs = [lm.x for lm in lms.landmark]
+        ys = [lm.y for lm in lms.landmark]
+        x_min = max(min(xs) * W, 0.0)
+        x_max = min(max(xs) * W, W)
+        y_min = max(min(ys) * H, 0.0)
+        y_max = min(max(ys) * H, H)
+        # add small padding
+        pad_x = (x_max - x_min) * 0.15
+        pad_y = (y_max - y_min) * 0.15
+        x1 = max(0.0, x_min - pad_x)
+        y1 = max(0.0, y_min - pad_y)
+        x2 = min(W * 1.0, x_max + pad_x)
+        y2 = min(H * 1.0, y_max + pad_y)
+
+        handed_label = results.multi_handedness[0].classification[0].label
+        handedness = 'r' if handed_label.lower().startswith('left') else 'l'
+
+        return [float(x1), float(y1), float(x2), float(y2)], handedness
 
 
 def main():
@@ -143,16 +215,7 @@ def main():
     parser.add_argument("--exp", required=True)
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--img", required=True, help="Path to input image")
-    parser.add_argument(
-        "--handedness",
-        required=True,
-        choices=["l", "r"],
-        help="Handedness of the hand in the image",
-    )
-    parser.add_argument(
-        "--bbox", nargs=4, type=float, help="Optional bbox x1 y1 x2 y2 in pixels"
-    )
-    parser.add_argument("--out", default="demo_out.png")
+    parser.add_argument("--out", default="render/demo_out.png")
     parser.add_argument(
         "--focal", nargs=2, type=float, help="Optional focal fx fy for camera"
     )
@@ -168,7 +231,14 @@ def main():
 
     cfg, model = load_cfg_and_model(args.exp, args.ckpt, device)
 
-    patches, square_bboxes, img_rgb = preprocess_image(args.img, args.bbox, cfg, handedness=args.handedness)
+    # detect bbox & handedness with MediaPipe (assume single hand in image)
+    bbox_det, handedness = detect_hand_with_mediapipe(args.img)
+    if bbox_det is None:
+        raise RuntimeError("No hand detected by MediaPipe in the input image")
+
+    print(f"MediaPipe detection bbox={bbox_det}, handedness={handedness}")
+
+    patches, square_bboxes, img_rgb = preprocess_image(args.img, bbox_det, cfg, handedness=handedness)
 
     # model expects inputs in batch where B dimension corresponds to batch-size, and temporal dimension T;
     # here patches has shape [B=1,T=1,C,H,W] or [1,1,C,H,W] depending on crop function.
@@ -208,7 +278,7 @@ def main():
         )
 
     # If left handed and original image was flipped in preprocess, adjust principal point x: princpt_x = W - princpt_x
-    if args.handedness == 'l':
+    if handedness == 'l':
         princpt[..., 0] = W - princpt[..., 0]
 
     with torch.inference_mode():
@@ -231,11 +301,17 @@ def main():
     reproj_uv = np.stack([u, v], axis=-1)
 
     # If left hand, the image was flipped during preprocessing, so un-flip x coordinates back to original image space
-    if args.handedness == 'l':
+    if handedness == 'l':
         H_img, W_img = img_rgb.shape[:2]
         reproj_uv[:, 0] = W_img - reproj_uv[:, 0]
 
-    visualize_and_save(img_rgb, reproj_uv, args.out)
+    visualize_and_save(
+        img_rgb,
+        reproj_uv,
+        args.out,
+        mediapipe_bbox=bbox_det,
+        mediapipe_handedness=handedness,
+    )
     print(f"Saved visualization to {args.out}")
 
 
