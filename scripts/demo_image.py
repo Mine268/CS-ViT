@@ -19,6 +19,8 @@ from cs_vit.net import Poser
 from cs_vit.config import FinetuneConfig
 from cs_vit.dataset.DexYCB import crop_tensor_with_square_box, expand_bbox_square
 from cs_vit.utils.misc import move_to_device
+from cs_vit.utils.img import draw_hands_on_image_batch
+from cs_vit.constants import TARGET_JOINTS_CONNECTION
 
 
 base_tranform = transforms.ToTensor()
@@ -117,11 +119,23 @@ def preprocess_image(img_path: str, bbox: Optional[List[float]], cfg: FinetuneCo
 
 
 def visualize_and_save(img_rgb: np.ndarray, reproj_uv: np.ndarray, out_path: str):
-    # reproj_uv: (J,2) in pixel coordinates on the cropped patch. We will draw on the original image by projecting back
-    vis = img_rgb.copy()
-    for (u, v) in reproj_uv:
-        cv2.circle(vis, (int(round(u)), int(round(v))), radius=3, color=(0, 255, 0), thickness=-1)
-    cv2.imwrite(out_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+    """
+    Draw joints and skeleton on the original image using the project's draw utility.
+
+    reproj_uv: (J,2) in pixel coordinates on original image
+    """
+    # prepare image tensor [N,C,H,W] in range [0,1]
+    img_t = torch.from_numpy(img_rgb.astype(np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0)
+    joints_t = torch.from_numpy(reproj_uv.astype(np.float32)).unsqueeze(0)  # [1,J,2]
+
+    # draw skeleton using project's utility
+    vis_tensor = draw_hands_on_image_batch(
+        img_t, joints_t, TARGET_JOINTS_CONNECTION, joints_color="red", connections_color="gray"
+    )
+
+    vis = (vis_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(out_path, vis)
 
 
 def main():
