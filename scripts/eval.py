@@ -17,7 +17,7 @@ from torchvision.utils import make_grid
 import numpy as np
 
 from cs_vit.net import Poser, warmup_scheduler
-from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB
+from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB, FreiHAND
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
 
@@ -50,7 +50,7 @@ def get_world_size() -> int:
     return int(os.environ["WORLD_SIZE"])
 
 
-def gather_strings(img_path: list, rank: int, world_size: int):
+def gather_strings(img_path: list, rank: int, world_size: int): # 多进程环境下把每个进程的字符串列表（路径列表？）收集到主进程
     max_len = max(len(s.encode('utf-8')) for s in img_path) if img_path else 0
     tensor = torch.zeros(len(img_path), max_len, dtype=torch.uint8, device=f"cuda:{get_rank()}")
     for i, s in enumerate(img_path):
@@ -60,7 +60,7 @@ def gather_strings(img_path: list, rank: int, world_size: int):
     gathered_tensors = [torch.zeros_like(tensor) for _ in range(world_size)]
     dist.all_gather(gathered_tensors, tensor)
 
-    if rank == 0:
+    if rank == 0: # 主进程
         all_paths = []
         for t in gathered_tensors:
             paths = []
@@ -72,7 +72,7 @@ def gather_strings(img_path: list, rank: int, world_size: int):
     return None
 
 
-def gather_tensors(tensor: torch.Tensor, rank: int, world_size: int):
+def gather_tensors(tensor: torch.Tensor, rank: int, world_size: int): # 把每个进程的tensor收集到主进程并拼接
     if rank == 0:
         gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
         dist.gather(tensor, gathered, dst=0)
@@ -94,7 +94,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     if cfg.data == "interhand26m":
         dataset = InterHand26MSeq(
             root=cfg.ih26mseq_root,
-            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len, # spatial检测单帧
             data_split="test",
             img_size=cfg.img_size,
             expansion_ratio=cfg.expansion_ratio,
@@ -117,6 +117,16 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
             protocol="s1",
             data_split="test",
+            img_size=cfg.img_size,
+            expansion_ratio=cfg.expansion_ratio
+        )
+        collate_fn = InterHand26MSeq.collate_fn
+        shuffle=True
+    elif cfg.data == "freihand":
+        dataset = FreiHAND(
+            root=cfg.freihand_root,
+            num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+            data_split="evaluation",
             img_size=cfg.img_size,
             expansion_ratio=cfg.expansion_ratio
         )
@@ -200,14 +210,14 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         or cfg.phase == "spatial"
     )
 
-    world_size = get_world_size()
+    world_size = get_world_size() # 获取全局进程数
     if rank == 0:
         date_str = datetime.now().strftime("%Y%m%d")
         h5_path = os.path.join(
             f"checkpoints/{cfg.exp}/"
             f"eval_{cfg.data}_{cfg.phase}_{cfg.temporal_supervision}_{date_str}.h5"
         )
-        h5file = h5py.File(h5_path, 'w')
+        h5file = h5py.File(h5_path, 'w') # 写模式新建文件
         str_dtype = h5py.special_dtype(vlen=str)
         h5file.create_dataset(
             "img_paths",
@@ -216,7 +226,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             dtype=str_dtype
         )
         h5file.create_dataset(
-            "joint_cam_gt",
+            "joint_cam_gt", # 真实位置
             shape=(0, 21, 3),
             maxshape=(None, 21, 3),
             dtype='float32',
@@ -224,7 +234,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             compression='gzip'
         )
         h5file.create_dataset(
-            "joint_cam_pred",
+            "joint_cam_pred", # 预测位置
             shape=(0, 21, 3),
             maxshape=(None, 21, 3),
             dtype='float32',
@@ -232,7 +242,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             compression='gzip'
         )
         h5file.create_dataset(
-            "joint_reproj_pred",
+            "joint_reproj_pred", # 预测投影
             shape=(0, 21, 2),
             maxshape=(None, 21, 2),
             dtype='float32',
@@ -240,7 +250,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             compression='gzip'
         )
         h5file.create_dataset(
-            "joint_reproj_gt",
+            "joint_reproj_gt", # 真实投影
             shape=(0, 21, 2),
             maxshape=(None, 21, 2),
             dtype='float32',
@@ -258,11 +268,11 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         batch = move_to_device(deepcopy(batch_), device)
         with torch.inference_mode():
             predict = model.module.predict_batch(
-                img_tensor=batch["patches"],
-                square_bboxes=batch["square_bboxes"],
+                img_tensor=batch["patches"], # 图像patch tensor
+                square_bboxes=batch["square_bboxes"], # 方形包围盒
                 timestamp=batch["timestamp"],
-                focal=batch["focal"],
-                princpt=batch["princpt"],
+                focal=batch["focal"], # 焦距
+                princpt=batch["princpt"], # 主点：相机光轴穿过成像平面的点
             )
 
         img_path = [x[-1] for x in batch["imgs_path"]]
@@ -270,11 +280,11 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         joint_cam_pred = predict["joint_cam"][:, -1]
 
         # reproj
-        joint_reproj_pred_u = (
+        joint_reproj_pred_u = ( # 水平方向像素坐标
             batch["focal"][..., :1] * predict["joint_cam"][..., 0] +
             batch["princpt"][..., :1] * predict["joint_cam"][..., 2]
         )
-        joint_reproj_pred_v = (
+        joint_reproj_pred_v = ( # 垂直方向像素坐标
             batch["focal"][..., 1:] * predict["joint_cam"][..., 1] +
             batch["princpt"][..., 1:] * predict["joint_cam"][..., 2]
         )
@@ -297,7 +307,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             pred_np = all_joint_cam_pred.detach().cpu().numpy().astype(np.float32)
             reproj_gt_np = all_joint_reproj_gt.detach().cpu().numpy().astype(np.float32)
             reproj_pred_np = all_joint_reproj_pred.detach().cpu().numpy().astype(np.float32)
-
+            # 在 .h5 文件中真正创建并写入了数据集
             current_size = h5file['img_paths'].shape[0]
             new_size = current_size + len(img_paths_np)
 
@@ -312,7 +322,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             h5file['joint_cam_pred'][current_size:new_size, :] = pred_np
             h5file['joint_reproj_gt'][current_size:new_size, :] = reproj_gt_np
             h5file['joint_reproj_pred'][current_size:new_size, :] = reproj_pred_np
-        torch.distributed.barrier()
+        torch.distributed.barrier() # 确保所有进程操作完后在进入下一次循环
 
     torch.distributed.barrier()
     if rank == 0:
@@ -323,7 +333,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="eval in gpu")
     parser.add_argument("--exp", type=str, required=True, help="Exp name")
     parser.add_argument("--data", type=str, required=True, help="Dataset",
-        choices=["interhand26m", "ho3d", "dexycb"]
+        choices=["interhand26m", "ho3d", "dexycb", "freihand"]
     )
     parser.add_argument("--seq_len", type=int, required=False, default=1, help="Sequence length")
     parser.add_argument("--batch_size", type=int, required=False, default=16)

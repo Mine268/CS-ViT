@@ -17,7 +17,7 @@ from torchvision.utils import make_grid
 import numpy as np
 
 from cs_vit.net import Poser, warmup_scheduler
-from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB
+from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB, FreiHAND
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
 from cs_vit.utils.tensor import calculate_gradient_norm
@@ -29,12 +29,12 @@ def nop(*a, **k):
     _, _ = a, k
 
 
-def ddp_setup():
+def ddp_setup(): # 初始化分布式训练，在多进程单节点或多节点训练时让各进程间能进行通信？
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.distributed.init_process_group(
         backend="nccl",
-        rank=int(os.environ["LOCAL_RANK"]),
-        world_size=int(os.environ["WORLD_SIZE"]),
+        rank=int(os.environ["LOCAL_RANK"]), # 进程对应的本地GPU编号
+        world_size=int(os.environ["WORLD_SIZE"]), # 训练中所参与进程的总数（2台机器每台4个GPU： WORLD_SIZE=8）
     )
 
 
@@ -60,7 +60,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     end_epoch = cfg.epoch
 
     summary_writer: Optional[SummaryWriter] = None
-    if rank == 0:
+    if rank == 0: # 只有rank=0负责写日志、保存ckpt、记录tensorboard，防止重复和冲突
         summary_writer = SummaryWriter(log_dir=f"./checkpoints/{cfg.exp}/tb_logs")
 
     # 1. init dataset
@@ -72,7 +72,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
                 num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
                 data_split="train",
                 img_size=cfg.img_size,
-                expansion_ratio=cfg.expansion_ratio,
+                expansion_ratio=cfg.expansion_ratio, # bbox扩展比率？
             )
         )
         print_("Added interhand26m")
@@ -92,13 +92,24 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             DexYCB(
                 root=cfg.dexycb_root,
                 num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
-                protocol="s1",
+                protocol="s1", # 分布式通信协议相关？
                 data_split="train",
                 img_size=cfg.img_size,
                 expansion_ratio=cfg.expansion_ratio,
             )
         )
         print_("Added dexycb")
+    if "freihand" in cfg.data:
+        dataset_list.append(
+            FreiHAND(
+                root=cfg.freihand_root,
+                num_frames=1 if cfg.phase == "spatial" else cfg.seq_len,
+                data_split="training",
+                img_size=cfg.img_size,
+                expansion_ratio=cfg.expansion_ratio,
+            )
+        )
+        print_("Added freihand")
     dataset = ConcatDataset(datasets=dataset_list)
     dataloader = DataLoader(
         dataset=dataset,
@@ -106,8 +117,8 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         pin_memory=False,
         drop_last=False,
         num_workers=8,
-        sampler=DistributedSampler(dataset, shuffle=True, drop_last=False),
-        collate_fn=InterHand26MSeq.collate_fn
+        sampler=DistributedSampler(dataset, shuffle=True, drop_last=False), # 保证每个进程读取不同的子集
+        collate_fn=InterHand26MSeq.collate_fn # 如何将dataset里的样本合成一个batch
     )
 
     # 2. setup model
@@ -128,8 +139,8 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
     if cfg.phase == "temporal":
-        if cfg.spatial_ckpt is not None:
-            model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False)
+        if cfg.spatial_ckpt is not None: # 加载spatial阶段的权重
+            model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False) # merge
         else:
             print_(f"No checkpoint is set in temporal phase.")
     model.to(rank)
@@ -138,7 +149,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     )
 
     # 3. optimizer
-    max_lr = math.sqrt(get_world_size() * cfg.batch_size / 44) * cfg.lr
+    max_lr = math.sqrt(get_world_size() * cfg.batch_size / 44) * cfg.lr # 经验性的？
     min_lr = math.sqrt(get_world_size() * cfg.batch_size / 44) * cfg.lr_min
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -147,7 +158,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
 
     # 4. scheduler
     scheduler: torch.optim.lr_scheduler.LRScheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lambda _: 1.0
+        optimizer, lambda _: 1.0 # 恒定因子为1，不改变lr
     )
     in_epoch_scheduler: bool = False
     if cfg.lr_scheduler == "warmup":
@@ -159,7 +170,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             annealing_epochs=cfg.cooldown_epoch,
             steps_per_epoch=len(dataloader),
         )
-        in_epoch_scheduler = True
+        in_epoch_scheduler = True # 每个step/batch更新
     elif cfg.lr_scheduler == "constant":
         scheduler = scheduler
         in_epoch_scheduler = None
@@ -173,10 +184,10 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         ckpt: Dict[str, Any] = torch.load(
             f"./checkpoints/{cfg.exp}/checkpoint.pt",
             map_location=device,
-            weights_only=False,
+            weights_only=False, # 这是什么参数
         )
 
-        start_epoch = ckpt["epoch"] + 1
+        start_epoch = ckpt["epoch"] + 1 # 从上次保存的epoch后继续训练
         model.module.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
@@ -212,11 +223,11 @@ def train_one_epoch(
     for it, batch_ in enumerate(dataloader):
         # move to device
         batch = move_to_device(deepcopy(batch_), device)
-        del batch_
+        del batch_ # 释放原来的引用
         # batch = move_to_device(batch_, device)
 
         # forward
-        forward_result = model(batch)
+        forward_result = model(batch) # 返回loss和logs
 
         # backward
         loss = forward_result["loss"]
@@ -225,17 +236,17 @@ def train_one_epoch(
             print_("loss is nan, skipping this batch")
             continue
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0) # 裁剪梯度的全局范数，防止梯度爆炸
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
         # lr update
         if in_step_scheduler is not None and in_step_scheduler:
-            scheduler_.step()
+            scheduler_.step() # 学习率按step更新，每个mini-batch后调用
 
         # log
         if log_every is not None and (it + 1) % log_every == 0:
-            global_step = epoch * len(dataloader) + it + 1
+            global_step = epoch * len(dataloader) + it + 1 # epoch默认从1开始，这里要减一吗？
             if summary_writer is not None:
                 # plot scalars to tb
                 for group, value in flatten_dict(forward_result["logs"]["scalar"]):
@@ -332,7 +343,7 @@ def main(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         )
 
         # dump checkpoints to file
-        if rank == 0 and (epoch % 1 == 0 or epoch == end_epoch):
+        if rank == 0 and (epoch % 1 == 0 or epoch == end_epoch): # 每个epoch都存
             print_(f"writing checkpoint for epoch {epoch}.")
             torch.save(
                 {
@@ -398,7 +409,7 @@ if __name__ == "__main__":
         choices=["query", "patch"]
     )
     parser.add_argument("--data", type=str, required=True, help="Dataset", nargs="+",
-        choices=["interhand26m", "ho3d", "dexycb"]
+        choices=["interhand26m", "ho3d", "dexycb", "freihand"]
     )
     parser.add_argument("--seq_len", type=int, required=False, default=7, help="Sequence length")
     parser.add_argument("--batch_size", type=int, required=False, default=16)

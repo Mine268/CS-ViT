@@ -28,7 +28,7 @@ from ..net.transformer_module import PositionalEncoding
 from ..net.latent_transformers import ScaleRotComplexEmbedTransformationGroup
 
 
-def derivative(x: torch.Tensor, dim: int) -> torch.Tensor:
+def derivative(x: torch.Tensor, dim: int) -> torch.Tensor: # 中心差分法在指定维度上近似导数
     """
     Calculate the derivative by finite difference.
 
@@ -40,15 +40,15 @@ def derivative(x: torch.Tensor, dim: int) -> torch.Tensor:
         torch.Tensor: Derivative value, temporal dim length-2
     """
     assert dim < x.ndim
-    assert x.size(dim) >= 3
+    assert x.size(dim) >= 3 # 会丢掉首尾各一个元素
 
     slice_next = [slice(None)] * x.ndim
-    slice_next[dim] = slice(2, None)
+    slice_next[dim] = slice(2, None) # 2, 3, ..., T-1
 
     slice_prev = [slice(None)] * x.ndim
-    slice_prev[dim] = slice(0, -2)
+    slice_prev[dim] = slice(0, -2) # 0, 1, ..., T-3
 
-    return (x[tuple(slice_next)] - x[tuple(slice_prev)]) / 2.0
+    return (x[tuple(slice_next)] - x[tuple(slice_prev)]) / 2.0 # [f(t+1) - f(t-1)]/2
 
 
 class AxisAngleLoss(nn.Module):
@@ -59,13 +59,13 @@ class AxisAngleLoss(nn.Module):
 
     def forward(self, pred, target):
         """[b,t,j,d]"""
-        pred_angle = torch.norm(pred, p=2, dim=-1, keepdim=True)
+        pred_angle = torch.norm(pred, p=2, dim=-1, keepdim=True) # 最后一维的L2范数，[b,t,j,1]
         pred_axis = pred / pred_angle
         target_angle = torch.norm(target, p=2, dim=-1, keepdim=True)
         target_axis = target / target_angle
 
-        angle_loss = torch.abs(pred_angle - target_angle).mean()
-        axis_loss = (1 - (pred_axis * target_axis).sum(-1).clamp(-1, 1)).mean()
+        angle_loss = torch.abs(pred_angle - target_angle).mean() # 角度损失
+        axis_loss = (1 - (pred_axis * target_axis).sum(-1).clamp(-1, 1)).mean() # 轴向损失=1-cos
 
         return self.lambda_a * angle_loss + self.lambda_b * axis_loss
 
@@ -84,7 +84,7 @@ class SpatialEncoder(nn.Module):
         self.num_layer = num_layer
         self.layer_type = layer_type
 
-        self.pe_spatial = PositionalEncoding(self.embed_dim, mode="absolute")
+        self.pe_spatial = PositionalEncoding(self.embed_dim, mode="absolute") # 绝对位置编码
         if self.layer_type == "decoder":
             self.layers = nn.ModuleList([
                 DecoderBlock(self.embed_dim, self.num_heads) for _ in range(self.num_layer)
@@ -92,7 +92,7 @@ class SpatialEncoder(nn.Module):
         elif self.layer_type == "encoder":
             self.layers = nn.ModuleList([
                 EncoderBlock(self.embed_dim, self.num_heads) for _ in range(self.num_layer)
-            ])
+            ]) # 论文中对应的是encoder吗？
         else:
             raise NotImplementedError(f"unknown layer type: {self.layer_type}")
 
@@ -107,12 +107,12 @@ class SpatialEncoder(nn.Module):
         if self.layer_type == "decoder":
             x_embed = self.pe_spatial(x)
             for module in self.layers:
-                x_embed = module(x_embed, ctx)
+                x_embed = module(x_embed, ctx) # Q, KV？
             return x_embed
         elif self.layer_type == "encoder":
             x_embed = self.pe_spatial(torch.cat([x, ctx], dim=1))  # [B,Q+L,D]
             for module in self.layers:
-                x_embeb = module(x_embed)
+                x_embeb = module(x_embed) # x_embeb？
             return x_embeb[:, :x.shape[1]]
 
 
@@ -140,7 +140,7 @@ class TemporalEncoder(nn.Module):
             pe_mode = "absolute"
             BlockType = EncoderBlock
         elif target == "realtime":
-            pe_mode = "trope"
+            pe_mode = "trope" # 显式接收时间戳？
             BlockType = CrossAttnDecoder
 
         self.pe_temporal = PositionalEncoding(self.embed_dim, mode=pe_mode)
@@ -164,9 +164,9 @@ class TemporalEncoder(nn.Module):
         """
         assert (self.target == "realtime" and timestamp is not None) or self.target == "full"
         if self.target == "realtime":
-            time_index = timestamp / self.trope_scalar
+            time_index = timestamp / self.trope_scalar # 归一化，防止数值过大
             x_embed = self.pe_temporal(x, time_index)
-            x_last, x_seq = x_embed[:, -1:], x_embed
+            x_last, x_seq = x_embed[:, -1:], x_embed # 只输出最后一帧更新量，用整个过去的序列作为上下文
             for module in self.layers:
                 x_last = module(x_last, x_seq)
             return self.zero_conv(x_last)
@@ -211,7 +211,7 @@ class Poser(nn.Module):
     def __init__(
         self,
         # basic setup
-        backbone: str,
+        backbone: str, # swin transformer？
         num_pose_query: int = 16,
         num_spatial_layer: int = 6,
         spatial_layer_type: str = "decoder",
@@ -236,7 +236,7 @@ class Poser(nn.Module):
         assert temporal_supervision in ["full", "realtime"]
         assert persp_embed_method in ["dense", "sparse"]
         assert persp_decorate in ["query", "patch"]
-        assert global_positioning in ["direct", "orientation"]
+        assert global_positioning in ["direct", "orientation"] # 直接采用图片 vs. 对图片进行旋转？
 
         self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
@@ -255,7 +255,7 @@ class Poser(nn.Module):
         self.global_positioning = global_positioning
 
         self.training_phase = Poser.TrainingPhase.INFERENCE
-        self.image_preprocessor = transforms.Compose([
+        self.image_preprocessor = transforms.Compose([ # 图像归一化？
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], inplace=False
             )
@@ -445,15 +445,15 @@ class Poser(nn.Module):
         n = 1
         imgs = rearrange(imgs, "b t c h w -> (b t) c h w", b=batch_size, t=num_frames)
         imgs_norm = self.image_preprocessor(imgs)
-        patches = self.backbone(imgs_norm).last_hidden_state  # [bt,l=64,d]
+        patches = self.backbone(imgs_norm).last_hidden_state  # [bt,l=64,d] # last_hidden_state如何定义的？
 
         # Perspective feature encode
         # [bt,d]
-        persp_bias = self.perspective_mlp(
+        persp_bias = self.perspective_mlp( # 把透视信息映射到模型维度
             rearrange(persp_vec, "b t p q d -> (b t) (p q d)")
         )
 
-        # Init the query pathces
+        # Init the query pathces # 两种有什么区别？
         query_patches = self.query_token[None, ...].repeat(batch_size * num_frames, 1, 1)
         if self.persp_decorate == "query":
             query_patches = query_patches + persp_bias[:, None, :]
@@ -467,8 +467,8 @@ class Poser(nn.Module):
         )
         angle_rad = (
             torch.rand(size=(batch_size,), device=device, dtype=dtype) * 2 * torch.pi
-        )
-        if self.latent_trans is not None:
+        ) # 为什么取随意的两个值？
+        if self.latent_trans is not None: # 对照组的意义？
             patches_trans = self.latent_trans.do_sr(patches, scale_coef, angle_rad)
             n = 2
             # [2bt,l,d]
@@ -480,7 +480,7 @@ class Poser(nn.Module):
 
         # Spatial fusion
         # [bt or 2bt,J+2,d]
-        patches_decode = self.spatial_encoder(query_patches, patches)
+        patches_decode = self.spatial_encoder(query_patches, patches) # 融合query和patches
 
         # Temporal fusion
         if self.training_phase in [
@@ -509,7 +509,7 @@ class Poser(nn.Module):
                 root_patches_decode = root_patches_decode + self.root_temporal_encoder(
                     root_patches_decode
                 )
-            elif self.temporal_supervision == "realtime":
+            elif self.temporal_supervision == "realtime": # 文章图片像realtime？
                 # repeat timestamp to align the (bq, t)
                 # timestamp = torch.repeat_interleave(timestamp, repeats=3, dim=0)
                 # [(b), t=1, d]
@@ -543,7 +543,7 @@ class Poser(nn.Module):
                 q=3,
             )
 
-        pose_patches = patches_decode[:, :, -3]  # [b or 2b,t,d]
+        pose_patches = patches_decode[:, :, -3]  # [b or 2b,t,d] # or 2b: if latent_trans
         shape_patches = patches_decode[:, :, -2]  # [b or 2b,t,d]
         root_patches = patches_decode[:, :, -1]  # [b or 2b,t,d]
 
@@ -551,7 +551,7 @@ class Poser(nn.Module):
         pose_6d = rearrange(
             self.pose_decoder(pose_patches), "(n b) t (j d) -> (n b) t j d", n=n, d=6
         )
-        pose_aa = matrix_to_axis_angle(rotation_6d_to_matrix(pose_6d))  # [b or 2b,t,j,3]
+        pose_aa = matrix_to_axis_angle(rotation_6d_to_matrix(pose_6d))  # [b or 2b,t,j,3] # 3D axis-angle 向量
         shape = self.shape_decoder(shape_patches)  # [b or 2b,t,10]
         root_transl_norm = self.root_decoder(root_patches)  # [b or 2b,t,3]
 
@@ -566,7 +566,7 @@ class Poser(nn.Module):
             rot_z_mat[:, :, 1, 1] = cos[:, None]
             rot_z_mat[:, :, 2, 2] = 1
 
-            pose_mat_trans = axis_angle_to_matrix(pose_aa[batch_size:].clone())  # [b,t,j,3,3]
+            pose_mat_trans = axis_angle_to_matrix(pose_aa[batch_size:].clone())  # [b,t,j,3,3] # [batch_size:]被变换的那一半
             pose_mat_trans = rot_z_mat[:, :, None] @ pose_mat_trans
             pose_aa_trans = matrix_to_axis_angle(pose_mat_trans)  # [b,t,j,3]
             pose_aa[batch_size:] = pose_aa_trans
@@ -588,8 +588,8 @@ class Poser(nn.Module):
         is_norm: bool = True,
     ):
         """Invoke MANO layer to get vertices and joints"""
-        B, _, J1, _ = pose_aa.shape
-        J2 = self.J_regressor_mano.shape[0]
+        B, _, J1, _ = pose_aa.shape # batch，关节数
+        J2 = self.J_regressor_mano.shape[0] # 要回归出的关节数
         shape = rearrange(shape, "b t d -> (b t) d")
         pose_aa = rearrange(pose_aa, "b t j d -> (b t) (j d)")
         # with torch.no_grad():
@@ -614,14 +614,14 @@ class Poser(nn.Module):
         if is_norm:
             mean_length: torch.Tensor = mean_connection_length(joints_mano, TARGET_JOINTS_CONNECTION)
             mean_length = 1e3 * rearrange(mean_length, "(b t) -> b t 1", b=B)  # [B,T,1], mm
-            root_transl = root_transl_norm * mean_length  # [B,T,3]
+            root_transl = root_transl_norm * mean_length  # [B,T,3] # 放缩回真实尺度
             # Post-process of root translation, in mm
         else:
             root_transl = root_transl_norm
 
         # [B,T,V,3]
         verts_cam = rearrange(
-            (mano_output.vertices - joints_mano[:, :1]) * 1e3,
+            (mano_output.vertices - joints_mano[:, :1]) * 1e3, # 顶点相对根关节的位置，mm
             "(b t) v d -> b t v d", b=B
         ) + root_transl[:, :, None]
         # [B,T,J,3]
@@ -630,14 +630,14 @@ class Poser(nn.Module):
             "(b t) j d -> b t j d", b=B, j=J2
         ) + root_transl[:, :, None]
 
-        return joint_cam, verts_cam, root_transl
+        return joint_cam, verts_cam, root_transl # 相机坐标系内？mm
 
-    def _sample_persp_dir_vec(
+    def _sample_persp_dir_vec( # 采样透视方向向量
         self,
         num_sample: int,
         bbox: torch.Tensor,
         focal: torch.Tensor,
-        princpt: torch.Tensor,
+        princpt: torch.Tensor, # 相机主点？
     ):
         """
         Args:
@@ -646,19 +646,19 @@ class Poser(nn.Module):
         """
         grid = torch.linspace(
             1 / num_sample * 0.5, 1 - 1 / num_sample * 0.5, num_sample, device=bbox.device
-        )  # [p]
+        )  # [p] # p个(0, 1)的中心采样点
         x_grid = (
             bbox[:, :, 0:1] + (bbox[:, :, 2:3] - bbox[:, :, 0:1]) * grid[None, None, :]
         )  # [B,T,p]
         y_grid = (
             bbox[:, :, 1:2] + (bbox[:, :, 3:4] - bbox[:, :, 1:2]) * grid[None, None, :]
         )  # [B,T,p]
-        # [B,T,p,p,2]
         grid = torch.stack([
             x_grid[:, :, :, None].expand(-1, -1, -1, grid.shape[0]),
             y_grid[:, :, None, :].expand(-1, -1, grid.shape[0], -1),
-        ], dim=-1)
-        directions = (grid - princpt[:, :, None, None, :]) / focal[:, :, None, None, :]
+        ], dim=-1)# [B,T,p,p,2]
+
+        directions = (grid - princpt[:, :, None, None, :]) / focal[:, :, None, None, :] # 相机主点，焦点？
         directions = torch.cat([directions, torch.ones_like(directions[..., :1])], dim=-1)
         directions = directions / torch.norm(directions, p="fro", dim=-1, keepdim=True)
         directions = directions[..., :2]  # [B,T,p,p,2] discard z value
@@ -667,7 +667,7 @@ class Poser(nn.Module):
     def predict_batch(
         self,
         img_tensor: torch.Tensor,
-        square_bboxes: torch.Tensor,
+        square_bboxes: torch.Tensor, # 手分割框 (x_min, y_min) (x_max, y_max)
         timestamp: torch.Tensor,
         focal: torch.Tensor,
         princpt: torch.Tensor,
@@ -718,21 +718,21 @@ class Poser(nn.Module):
         )
 
         # for baseline, oriente the pose and root
-        if self.global_positioning == "orientation":
+        if self.global_positioning == "orientation": # 什么是UV空间？
             v_half = (square_bboxes_center[:, :, 1] - princpt[:, :, 1]) / focal[:, :, 1]  # [B,T]
             u_half = (square_bboxes_center[:, :, 0] - princpt[:, :, 0]) / focal[:, :, 0]
             pitch_rad = torch.atan(v_half)  # [B,T]
             roll_rad = torch.atan(u_half)
             trans = rotation_matrix_y(roll_rad) @ rotation_matrix_x(pitch_rad)  # [B,T,3,3]
 
-            # root
+            # root # 上面不是已经做过类似的转换了吗？
             root_transl_norm = torch.einsum("btnd,btd->btn", trans, root_transl_norm)
 
             # pose
             pose_root_aa = pose_aa[:, :, 0]  # [B,T,3]
             pose_root_mat = axis_angle_to_matrix(pose_root_aa)  # [B,T,3,3]
             pose_root_mat = trans @ pose_root_mat
-            pose_root_aa_oriented = matrix_to_axis_angle(pose_root_aa)  # [B,T,3]
+            pose_root_aa_oriented = matrix_to_axis_angle(pose_root_aa)  # [B,T,3] # pose_root_mat？
             pose_aa[:, :, 0] = pose_root_aa_oriented
 
         # Forward the pose to joint position
@@ -749,16 +749,16 @@ class Poser(nn.Module):
 
     def _criterion(self, predict, batch):
         _, T = predict["joint_cam"].shape[:2]
-        time_idx = list(range(T)) if self.temporal_supervision != "full" else [-1]
+        time_idx = list(range(T)) if self.temporal_supervision != "full" else [-1] # 为什么realtime关心每一帧，full反而只关心最后一帧？
 
         # Joint loss
         loss_joint_cam = torch.mean(
             (predict["joint_cam"][:, time_idx] - batch["joint_cam"][:, time_idx]).norm(
-                p="fro", dim=-1
+                p="fro", dim=-1 # 对最后一维取L2范数
             )
             * batch["joint_valid"][:, time_idx]
         )
-        loss_joint_rel = torch.mean(
+        loss_joint_rel = torch.mean( # 相对于根关节的关节位置损失
             (
                 (
                     predict["joint_cam"][:, time_idx]
@@ -828,7 +828,7 @@ class Poser(nn.Module):
             tb_dict,
         )
 
-    def _vis(self, predict, batch):
+    def _vis(self, predict, batch): # 预测关节重投影到图像并画出来
         joint_reproj_pred_u = (
             batch["focal"][..., :1] * predict["joint_cam"][..., 0] +
             batch["princpt"][..., :1] * predict["joint_cam"][..., 2]
@@ -837,14 +837,14 @@ class Poser(nn.Module):
             batch["focal"][..., 1:] * predict["joint_cam"][..., 1] +
             batch["princpt"][..., 1:] * predict["joint_cam"][..., 2]
         )
-        # [B,T,J=21,2]
+        # [B,T,J=21,2] # 算(fx*x/z + cx, fy*y/z + cy)，等价于标准针孔投影
         joint_reproj_pred = torch.stack([joint_reproj_pred_u, joint_reproj_pred_v], dim=-1)
         joint_reproj_pred = joint_reproj_pred / predict["joint_cam"][..., -1:]
 
         # [T,C,H,W]
         img_vis = torch.stack([
             torch.from_numpy(cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
-            for p in batch["imgs_path"][0]
+            for p in batch["imgs_path"][0] # 只对batch的第一个样本可视化？
         ]) / 255
         if batch["flip"][0]:
             img_vis = torch.flip(img_vis, dims=[-1])
