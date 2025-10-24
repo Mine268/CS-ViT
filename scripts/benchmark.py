@@ -17,7 +17,7 @@ def align_w_scale(mtx1, mtx2, return_trafo=False):
     mtx2_t = mtx2 - t2
 
     # scale
-    s1 = np.linalg.norm(mtx1_t) + 1e-8
+    s1 = np.linalg.norm(mtx1_t) + 1e-8 # Frobenius范数
     mtx1_t /= s1
     s2 = np.linalg.norm(mtx2_t) + 1e-8
     mtx2_t /= s2
@@ -29,7 +29,7 @@ def align_w_scale(mtx1, mtx2, return_trafo=False):
     mtx2_t = np.dot(mtx2_t, R.T) * s
     mtx2_t = mtx2_t * s1 + t1
 
-    if return_trafo:
+    if return_trafo: # 返回变换参数
         return R, s, s1, t1 - t2
     else:
         return mtx2_t
@@ -73,14 +73,14 @@ def main(prediction: str):
 
     gt = prediction["joint_cam_gt"][:]
     pred = prediction["joint_cam_pred"][:]
-    gt_rel = gt - gt[:, :1]
+    gt_rel = gt - gt[:, :1] # 计算相对第一个关节的位置
     pred_rel = pred - pred[:, :1]
     gt_img = prediction["joint_reproj_gt"][:]
     pred_img = prediction["joint_reproj_pred"][:]
 
-    mprpe = np.mean(np.sqrt(np.sum((gt[:, 0] - pred[:, 0]) ** 2, axis=-1)))
-    mpjpe_cs = np.mean(np.mean(np.sqrt(np.sum((gt - pred) ** 2, axis=-1)), axis=-1))
-    mpjpe_rel = np.mean(np.mean(np.sqrt(np.sum((gt_rel - pred_rel) ** 2, axis=-1)), axis=-1))
+    mprpe = np.mean(np.sqrt(np.sum((gt[:, 0] - pred[:, 0]) ** 2, axis=-1))) # root的误差
+    mpjpe_cs = np.mean(np.mean(np.sqrt(np.sum((gt - pred) ** 2, axis=-1)), axis=-1)) # 平均关节误差
+    mpjpe_rel = np.mean(np.mean(np.sqrt(np.sum((gt_rel - pred_rel) ** 2, axis=-1)), axis=-1)) # 平均相对误差
 
     # Calculate PA-aligned metrics
     errors_pa = []
@@ -105,7 +105,7 @@ def main(prediction: str):
     error_root_z = np.abs((gt - pred)[:, 0, 2])  # [N,J]
     mean_error_root_z = np.mean(error_root_z)
 
-    # PCKs
+    # PCKs（不同阈值下）
     pck_05 = compute_pck_with_bbox_np(gt_img, pred_img, 0.05)
     pck_10 = compute_pck_with_bbox_np(gt_img, pred_img, 0.10)
     pck_15 = compute_pck_with_bbox_np(gt_img, pred_img, 0.15)

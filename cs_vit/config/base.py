@@ -32,6 +32,7 @@ class FinetuneConfig():
     ih26mseq_root: str = "/data_1/datasets_temp/InterHand2.6M_5fps_batch1"
     ho3d_root: str = "/data_1/datasets_temp/HO3D_v3"
     dexycb_root: str = "/data_1/datasets_temp/dexycb"
+    freihand_root: str = "/data_1/jiangyiran/datasets/FreiHAND_pub_v2"
 
     # Train
     phase: str = "inference"

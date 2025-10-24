@@ -4,3 +4,4 @@ from .ego4d import Ego4DHandImage
 from .HInt import HIntHandImage
 from .HO3D import HO3D
 from .DexYCB import DexYCB
+from .FreiHAND import FreiHAND

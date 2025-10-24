@@ -1,26 +1,52 @@
 from typing import *
-import os.path as osp
+import json
+import os
 import numpy as np
 import gc
 
-import h5py
 import cv2
 import torch
-import kornia.geometry.transform as K
 from torch.utils.data.dataset import Dataset
 from torchvision import transforms
+import kornia.geometry.transform as K
+import matplotlib.pyplot as plt
 
 from ..utils.img import crop_tensor_with_square_box, expand_bbox_square
 from ..utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
 
 
-class DexYCB(Dataset):
+def load_json(path):
+    with open(path, 'r') as f:
+        return json.load(f)
+    
+
+def project_joint(joint_3d, intr): # joint3d 投影到 joint2d
+    N, J, _ = joint_3d.shape
+    joint_2d = np.zeros((N, J, 2), dtype=np.float32)
+    for i in range(N):
+        fx = intr[i, 0, 0]
+        fy = intr[i, 1, 1]
+        cx = intr[i, 0, 2]
+        cy = intr[i, 1, 2]
+
+        X = joint_3d[i, :, 0]
+        Y = joint_3d[i, :, 1]
+        Z = joint_3d[i, :, 2].copy()
+        Z[Z == 0] = 1e-8
+
+        u = fx * X / Z + cx
+        v = fy * Y / Z + cy
+        joint_2d[i] = np.stack([u, v], axis=-1)
+
+    return joint_2d
+
+
+class FreiHAND(Dataset):
     def __init__(
         self,
         root: str,
         num_frames: int,
-        protocol: str,
-        data_split: str,
+        data_split: str, # training\evaluation
         img_size: int = 224,
         expansion_ratio: float = 1.25
     ):
@@ -28,11 +54,11 @@ class DexYCB(Dataset):
 
         self.root = root
         self.num_frames = num_frames
-        self.protocol = protocol
         self.data_split = data_split
         self.img_size = img_size
         self.expansion_ratio = expansion_ratio
 
+        # augmentation
         self.aug_transform = transforms.Compose([
             transforms.ColorJitter(
                 brightness=0.2,
@@ -47,74 +73,39 @@ class DexYCB(Dataset):
             transforms.RandomSolarize(threshold=0.5, p=0.2)
         ])
 
-        self.mano_pca_comps = np.load(osp.join(osp.dirname(__file__), "mano_lr_pca.npz"))
-        self.mano_pca_comps = {
-            "right": torch.from_numpy(self.mano_pca_comps["right"]).float(),
-            "left": torch.from_numpy(self.mano_pca_comps["left"]).float()
-        }
+        self.load_data()
 
-        self.source_h5 = h5py.File(
-            osp.join(self.root, f"{self.protocol}_{self.data_split}.h5"), mode="r"
-        )
-
-        self.seq_index = []
-        for seq_name, seq in self.source_h5["sequences"].items():
-            if seq["imgs_path"].shape[0] < self.num_frames:
-                continue
-            self.seq_index.append({
-                "path_h5": osp.join("/sequences", seq_name),
-                "seq_length": seq["imgs_path"].shape[0]
-            })
-
-        self.len = sum(v["seq_length"] - self.num_frames + 1 for v in self.seq_index)
-        self.aux_index = np.cumsum(
-            [v["seq_length"] - self.num_frames + 1 for v in self.seq_index]
-        ).tolist()
-
+        
     def __len__(self):
-        return self.len
+        return self.sample_len
+    
 
-    def locate(self, arr, target):
-        left, right = 0, len(arr) - 1
-        while left <= right:
-            mid = left + (right - left) // 2
-            if arr[mid] < target:
-                left = mid + 1
-            else:
-                right = mid - 1
-        return left
+    def load_data(self):
+        self.joint_3d = np.array(load_json(os.path.join(self.root, f"{self.data_split}_xyz.json"))) # [N, 21, 3]
+        self.mano = np.array(load_json(os.path.join(self.root, f"{self.data_split}_mano.json"))) # [N, 1, 61]
+        self.intrinsics = np.array(load_json(os.path.join(self.root, f"{self.data_split}_K.json")))  # [N, 3, 3]
+        # mesh = np.array(load_json(os.path.join(self.root, f"{self.data_split}_verts.json"))) # [N, 778, 3]
+        # scale = np.array(load_json(os.path.join(self.root, f"{self.data_split}_scale.json"))) # [N,]
+ 
+        self.joint_2d = project_joint(self.joint_3d, self.intrinsics) # [N ,21, 2]
+
+        rgb_path = os.path.join(self.root, f"{self.data_split}/rgb")
+        img_files = sorted(os.listdir(rgb_path))
+        self.imgs_path = [os.path.join(rgb_path, f) for f in img_files]
+        self.base_len = self.joint_3d.shape[0]
+        self.sample_len = len(self.imgs_path) - self.num_frames + 1 # 没有连续帧，只有单张用于训练spatial
+        
 
     @torch.no_grad()
     def __getitem__(self, ix):
         """
-        All images in HO3D are right-handed.
+        FreiHAND exclusively contains right hands.
         """
-        # locate the annot index and seq index
-        group_ix = self.locate(self.aux_index, ix + 1)
-        in_group_ix = ix if group_ix == 0 else ix - self.aux_index[group_ix - 1]
-
-        # extract the annot from hdf5
-        seq_annot = self.seq_index[group_ix]
-        annot_h5 = self.source_h5[seq_annot["path_h5"]]
-
-        # extract annot from h5
-        imgs_path: List[str] = annot_h5["imgs_path"][in_group_ix:in_group_ix + self.num_frames] # 多帧图片路径
-        imgs_path = [osp.join(self.root, str(v, "utf8")) for v in imgs_path]
-        handedness = str(annot_h5["handedness"][0], "utf-8") # 手性(左/右手)
-        joint_img = torch.from_numpy(
-            annot_h5["joint_2d"][in_group_ix:in_group_ix + self.num_frames]
-        ).float().contiguous()
-        joint_cam = torch.from_numpy(
-            annot_h5["joint_3d"][in_group_ix:in_group_ix + self.num_frames]
-        ).float().contiguous() * 1e3  # meter to millimeter # 2D/3D坐标，统一到mm
+        base_ix = ix %  self.base_len  # 4 different post processing strategies
+        joint_img = torch.from_numpy(self.joint_2d[base_ix : base_ix + self.num_frames]).float().contiguous()
+        joint_cam = torch.from_numpy(self.joint_3d[base_ix : base_ix + self.num_frames]).float().contiguous() * 1e3  # meter to millimeter
         joint_rel = joint_cam - joint_cam[:, :1] # 相对坐标
-        intr = (
-            torch.from_numpy(annot_h5["intrinsics"][:])
-            .float()
-            .contiguous()
-            .reshape(3, 3)[None, ...]
-            .repeat(self.num_frames, 1, 1) # 内参重复给每一帧（和数据集结构相关）
-        )
+        intr = torch.from_numpy(self.intrinsics[base_ix : base_ix + self.num_frames]).float().contiguous()
         focal = torch.cat([intr[:, 0, :1], intr[:, 1, 1:2]], dim=-1)
         princpt = torch.cat([intr[:, 0, 2:], intr[:, 1, 2:]], dim=-1)
 
@@ -123,6 +114,7 @@ class DexYCB(Dataset):
         x2, _ = joint_img[..., 0].max(dim=1)
         y1, _ = joint_img[..., 1].min(dim=1)
         y2, _ = joint_img[..., 1].max(dim=1)
+
         # expand by 1.1
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         wx, wy = (x2 - x1) / 2, (y2 - y1) / 2
@@ -131,43 +123,21 @@ class DexYCB(Dataset):
         # fill the tight bbox
         bbox_tight = torch.cat([x1[..., None], y1[..., None], x2[..., None], y2[..., None]], dim=-1)
         joint_bbox_img = joint_img - bbox_tight[:, None, :2]
-
-        # compute the patch # BRG or RBG???
-        imgs_orig = [
+        imgs_path = self.imgs_path[ix : ix + self.num_frames]
+        img_seq = [
             cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB) for img_path in imgs_path
         ]
-        imgs_orig = torch.stack([
-            torch.from_numpy(img.astype(np.float32) / 255.).permute(2, 0, 1) for img in imgs_orig
+        img_seq = torch.stack([
+            torch.from_numpy(img.astype(np.float32) / 255.).permute(2, 0, 1) for img in img_seq
         ])
 
         # MANO
-        mano_pose = torch.from_numpy(
-            annot_h5["pose_m"][0:0 + self.num_frames]
-        )[:, :48].float().contiguous()
-        mano_pose[:, 3:] = mano_pose[:, 3:] @ self.mano_pca_comps[handedness]
-        mano_shape = torch.from_numpy(
-            annot_h5["beta"][:]
-        ).float().contiguous()[None, :].repeat(self.num_frames, 1)
-
-        # flip
-        img_seq = imgs_orig
-        if handedness == "left":
-            _, _, _, W = imgs_orig.shape
-            img_seq = torch.flip(imgs_orig, dims=[-1,])
-            bbox_tight[:, 0], bbox_tight[:, 2] = \
-                W - bbox_tight[:, 2], W - bbox_tight[:, 0]
-            joint_img[:, :, 0] = W - joint_img[:, :, 0]
-            bbox_size_w = bbox_tight[:, 2] - bbox_tight[:, 0]
-            joint_bbox_img[:, :, 0] = bbox_size_w[:, None] - joint_bbox_img[:, :, 0]
-            joint_cam[..., 0] *= -1
-            joint_rel[..., 0] *= -1
-            mano_pose = mano_pose.reshape(-1, 16, 3)
-            mano_pose[..., 1:] *= -1
-            mano_pose = mano_pose.reshape(-1, 48)
-            princpt[:, 0] = W - princpt[:, 0]
+        mano_parameter = torch.from_numpy(self.mano[base_ix : base_ix + self.num_frames])
+        mano_pose = mano_parameter[:, 0, :48].float().contiguous()
+        mano_shape = mano_parameter[:, 0, 48:58].float().contiguous()
 
         rot_rad = torch.zeros(size=(img_seq.shape[0],))
-        if self.data_split == "train":
+        if self.data_split == "training":
             rot_rad = torch.ones(size=(img_seq.shape[0],)) * torch.rand(size=(1,)) * 2 * torch.pi
             rot_mat_3d = rotation_matrix_z(rot_rad)  # [T,3,3]
             rot_mat_2d = rot_mat_3d[:, :2, :2].transpose(-1, -2)  # [T,2,2]
@@ -208,7 +178,11 @@ class DexYCB(Dataset):
             patch = K.crop_and_resize(
                 img_seq, square_corners_orig, (self.img_size, self.img_size)
             )
-            patch = self.aug_transform(patch)
+            # try:
+            #     patch = K.crop_and_resize(img_seq, square_corners_orig, (self.img_size, self.img_size))
+            # except IndexError:
+            #     print(f"[Warning] Invalid crop at index {ix}, skip this sample.")
+            #     return None
         else:
             patch, _, square_bboxes = crop_tensor_with_square_box(
                 img_seq,
@@ -216,13 +190,13 @@ class DexYCB(Dataset):
                 self.expansion_ratio,
                 self.img_size,
             )
-
+        
         # assume all joint valid
         joint_valid = torch.ones(joint_cam.shape[:2])
 
         annot = {
-            "imgs_path": [osp.join(self.root, p) for p in imgs_path],  # List[str]
-            "flip": handedness[0][0] == "l",
+            "imgs_path": imgs_path,  # List[str;T]
+            "flip": False,  # all hands are right hand
             "rot_rad": rot_rad,  # [T]
             "patches": patch,  # [T,C,H',W']
             "square_bboxes": square_bboxes,  # [T,4]
@@ -232,13 +206,59 @@ class DexYCB(Dataset):
             "joint_cam": joint_cam,  # [T,J,3]
             "joint_valid": joint_valid,  # [T,J]
             "joint_rel": joint_rel,  # [T,J,3]
-            "mano_pose": mano_pose,  # [T,48], flat_hand_mean=False
+            "mano_pose": mano_pose,  # [T,48]
             "mano_shape": mano_shape,  # [T,10]
-            "timestamp": torch.arange(start=0, end=self.num_frames) * 33.333,  # [T]
+            "timestamp": torch.arange(0, self.num_frames) * 33.33333, # [T]
             "focal": focal,  # [T,2]
             "princpt": princpt,  # [T,2]
         }
-
+        
         gc.collect()
 
         return annot
+    
+
+if __name__ == '__main__':
+    dataset = FreiHAND(
+        root="/data_1/jiangyiran/datasets/FreiHAND_pub_v2",
+        num_frames=1,
+        data_split="training", # training/evaluation
+        img_size=256,
+        expansion_ratio= 1.25
+    )    
+    sample = dataset[38953]
+    tx = 0
+
+    img_cv = cv2.imread(sample["imgs_path"][tx])
+    if sample["flip"]:
+        img_cv = img_cv[:, ::-1].copy()
+    img = torch.from_numpy(img_cv[:, :, ::-1].copy()).permute(2,0,1)[None] / 255
+    rot_rad = sample["rot_rad"][tx].item()
+
+    intr = torch.zeros(size=(7,3,3))
+    intr[:, 0, 0] = sample["focal"][:, 0]
+    intr[:, 1, 1] = sample["focal"][:, 1]
+    intr[:, 0, 2] = sample["princpt"][:, 0]
+    intr[:, 1, 2] = sample["princpt"][:, 1]
+    intr[:, 2, 2] = 1
+
+    print(rot_rad / torch.pi * 180)
+
+    joint_3d = sample["joint_cam"]
+    joint_proj = joint_3d @ intr.transpose(-1, -2)
+    joint_proj = joint_proj[:, :, :2] / joint_proj[:, :, 2:]
+
+    img_rot = K.rotate(img, angle=sample["rot_rad"][tx:tx+1]/torch.pi*180, center=sample["princpt"][tx:tx+1])[0]
+
+    plt.imshow(img_rot.permute(1, 2, 0))
+    plt.scatter(sample["joint_img"][tx, :, 0], sample["joint_img"][tx, :, 1], s=2)
+    plt.scatter(joint_proj[tx, :, 0], joint_proj[tx, :, 1], s=2)
+    plt.savefig("/data_1/jiangyiran/CS-ViT/tests/freihand/img_rot_joints.png")
+    plt.close()
+
+    xm, ym, xM, yM = sample["square_bboxes"][tx].int()
+    img_crop = img_rot.permute(1,2,0)[ym:yM, xm:xM].cpu().numpy()
+    plt.imsave("/data_1/jiangyiran/CS-ViT/tests/freihand/img_crop_bbox.png", img_crop)
+
+    patch_img = sample["patches"][tx].permute(1,2,0).cpu().numpy()
+    plt.imsave( "/data_1/jiangyiran/CS-ViT/tests/freihand/img_patch.png", patch_img)

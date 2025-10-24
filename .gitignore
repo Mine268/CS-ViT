@@ -13,6 +13,7 @@ events.*
 *.safetensors
 *.ipynb
 !notebook/*
+*.avi
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
