@@ -142,7 +142,7 @@ class DexYCB(Dataset):
 
         # MANO
         mano_pose = torch.from_numpy(
-            annot_h5["pose_m"][0:0 + self.num_frames]
+            annot_h5["pose_m"][in_group_ix:in_group_ix + self.num_frames]
         )[:, :48].float().contiguous()
         mano_pose[:, 3:] = mano_pose[:, 3:] @ self.mano_pca_comps[handedness]
         mano_shape = torch.from_numpy(
