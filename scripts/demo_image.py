@@ -29,20 +29,6 @@ from cs_vit.constants import TARGET_JOINTS_CONNECTION
 
 
 base_tranform = transforms.ToTensor()
-# NOTE: this is the same as the augmentation used during training, which we mistakenly coded
-# for 100% augmentation probability.
-aug_transform = transforms.Compose(
-    [
-        transforms.ColorJitter(
-            brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1
-        ),
-        transforms.RandomGrayscale(p=0.1),
-        transforms.RandomApply(
-            [transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))], p=0.2
-        ),
-        transforms.RandomSolarize(threshold=0.5, p=0.2),
-    ]
-)
 
 def load_cfg_and_model(exp: str, ckpt_path: str, device: torch.device):
     # load config
@@ -89,7 +75,6 @@ def preprocess_image(img_path: str, bbox: Optional[List[float]], cfg: FinetuneCo
     assert img_bgr is not None, f"Failed to read image: {img_path}"
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     img_t = base_tranform(img_rgb)
-    img_t = aug_transform(img_t)  # apply augmentation
     img_t = img_t.unsqueeze(0)  # [1,C,H,W]
 
     # if bbox not provided, center crop square box
