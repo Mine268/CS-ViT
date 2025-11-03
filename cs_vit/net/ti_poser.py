@@ -268,8 +268,12 @@ class Poser(nn.Module):
             self.backbone.config.num_heads[-1]
             if isinstance(self.backbone.config.num_heads, list)
             else self.backbone.config.num_heads
+        ) if hasattr(self.backbone.config, "num_heads") else 8
+        self.num_p = (
+            self.image_size // 32
+            if "swin" in self.backbone_ckpt_dir
+            else self.image_size // self.backbone.config.patch_size
         )
-        self.num_p = self.image_size // 32  # swin-transformer
 
         # latent transformer
         if self.num_latent_layer is not None:

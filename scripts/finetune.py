@@ -424,6 +424,10 @@ if __name__ == "__main__":
     exp_name: str = args.exp
 
     cfg = deepcopy(default_finetune_cfg)
+    if "swin" in args.backbone:
+        cfg.img_size = 256
+    elif "dino" in args.backbone:
+        cfg.img_size = 224
 
     ddp_setup()
     random.seed(42)
