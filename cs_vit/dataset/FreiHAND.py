@@ -18,7 +18,7 @@ from ..utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_
 def load_json(path):
     with open(path, 'r') as f:
         return json.load(f)
-    
+
 
 def project_joint(joint_3d, intr): # joint3d 投影到 joint2d
     N, J, _ = joint_3d.shape
@@ -75,10 +75,10 @@ class FreiHAND(Dataset):
 
         self.load_data()
 
-        
+
     def __len__(self):
         return self.sample_len
-    
+
 
     def load_data(self):
         self.joint_3d = np.array(load_json(os.path.join(self.root, f"{self.data_split}_xyz.json"))) # [N, 21, 3]
@@ -86,7 +86,7 @@ class FreiHAND(Dataset):
         self.intrinsics = np.array(load_json(os.path.join(self.root, f"{self.data_split}_K.json")))  # [N, 3, 3]
         # mesh = np.array(load_json(os.path.join(self.root, f"{self.data_split}_verts.json"))) # [N, 778, 3]
         # scale = np.array(load_json(os.path.join(self.root, f"{self.data_split}_scale.json"))) # [N,]
- 
+
         self.joint_2d = project_joint(self.joint_3d, self.intrinsics) # [N ,21, 2]
 
         rgb_path = os.path.join(self.root, f"{self.data_split}/rgb")
@@ -94,7 +94,7 @@ class FreiHAND(Dataset):
         self.imgs_path = [os.path.join(rgb_path, f) for f in img_files]
         self.base_len = self.joint_3d.shape[0]
         self.sample_len = len(self.imgs_path) - self.num_frames + 1 # 没有连续帧，只有单张用于训练spatial
-        
+
 
     @torch.no_grad()
     def __getitem__(self, ix):
@@ -190,7 +190,7 @@ class FreiHAND(Dataset):
                 self.expansion_ratio,
                 self.img_size,
             )
-        
+
         # assume all joint valid
         joint_valid = torch.ones(joint_cam.shape[:2])
 
@@ -206,17 +206,18 @@ class FreiHAND(Dataset):
             "joint_cam": joint_cam,  # [T,J,3]
             "joint_valid": joint_valid,  # [T,J]
             "joint_rel": joint_rel,  # [T,J,3]
+            "mano_valid": False,
             "mano_pose": mano_pose,  # [T,48]
             "mano_shape": mano_shape,  # [T,10]
             "timestamp": torch.arange(0, self.num_frames) * 33.33333, # [T]
             "focal": focal,  # [T,2]
             "princpt": princpt,  # [T,2]
         }
-        
+
         gc.collect()
 
         return annot
-    
+
 
 if __name__ == '__main__':
     dataset = FreiHAND(
@@ -225,7 +226,7 @@ if __name__ == '__main__':
         data_split="training", # training/evaluation
         img_size=256,
         expansion_ratio= 1.25
-    )    
+    )
     sample = dataset[38953]
     tx = 0
 

@@ -57,15 +57,25 @@ class AxisAngleLoss(nn.Module):
         self.lambda_a = lambda_a
         self.lambda_b = lambda_b
 
-    def forward(self, pred, target):
-        """[b,t,j,d]"""
+    def forward(self, pred, target, weight):
+        """[b,t,j,d], [b]"""
         pred_angle = torch.norm(pred, p=2, dim=-1, keepdim=True) # 最后一维的L2范数，[b,t,j,1]
         pred_axis = pred / pred_angle
         target_angle = torch.norm(target, p=2, dim=-1, keepdim=True)
         target_axis = target / target_angle
 
-        angle_loss = torch.abs(pred_angle - target_angle).mean() # 角度损失
-        axis_loss = (1 - (pred_axis * target_axis).sum(-1).clamp(-1, 1)).mean() # 轴向损失=1-cos
+        angle_loss = torch.mean(
+            rearrange(torch.abs(pred_angle - target_angle), "b t j d -> b (t j d)"),
+            dim=1
+        )
+        angle_loss = torch.mean(angle_loss * weight)
+        axis_loss = torch.mean(
+            rearrange(
+                1 - (pred_axis * target_axis).sum(-1).clamp(-1, 1), "b t j -> b (t j)"
+            ),
+            dim=1,
+        )
+        axis_loss = torch.mean(axis_loss * weight)
 
         return self.lambda_a * angle_loss + self.lambda_b * axis_loss
 
@@ -775,7 +785,9 @@ class Poser(nn.Module):
             ).norm(p="fro", dim=-1)
             * batch["joint_valid"][:, time_idx]
         )
+
         # Vertices loss
+        mano_flag_weight = batch["mano_valid"].float()  # [B]
         with torch.no_grad():
             # [B,T,V,3]
             _, verts_cam_gt, _ = self._pose_fk(
@@ -784,16 +796,21 @@ class Poser(nn.Module):
                 root_transl_norm=batch["joint_cam"][:, :, 0],
                 is_norm=False
             )
-        loss_verts_cam = (predict["verts_cam"] - verts_cam_gt).norm(dim=-1, p=2).mean()
+        loss_verts_cam = (predict["verts_cam"] - verts_cam_gt).norm(dim=-1, p=2).mean(dim=[1, 2])
+        loss_verts_cam = (loss_verts_cam * mano_flag_weight).mean()
         # Axis angle loss
         loss_axis_angle = 100 * self.axis_angle_criterion(
             predict["pose_aa"],
             rearrange(batch["mano_pose"], "b t (j d) -> b t j d", d=3),
+            mano_flag_weight
         )
         # Shape loss
         loss_shape = (
-            predict["shape"][:, time_idx] - batch["mano_shape"][:, time_idx]
-        ).abs().mean()
+            (predict["shape"][:, time_idx] - batch["mano_shape"][:, time_idx])
+            .abs()
+            .mean(dim=[1, 2])
+            * mano_flag_weight
+        ).mean()
 
         # Temporal smoothness
         if (

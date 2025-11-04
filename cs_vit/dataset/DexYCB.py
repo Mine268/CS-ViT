@@ -232,6 +232,7 @@ class DexYCB(Dataset):
             "joint_cam": joint_cam,  # [T,J,3]
             "joint_valid": joint_valid,  # [T,J]
             "joint_rel": joint_rel,  # [T,J,3]
+            "mano_valid": True,
             "mano_pose": mano_pose,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape,  # [T,10]
             "timestamp": torch.arange(start=0, end=self.num_frames) * 33.333,  # [T]

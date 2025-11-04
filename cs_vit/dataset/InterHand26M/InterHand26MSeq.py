@@ -27,6 +27,8 @@ class InterHand26MSeq(Dataset):
         for key in keys:
             if key in ["imgs_path", "flip"]:
                 collated_annot[key] = [sample[key] for sample in batch]
+            elif key in ["mano_valid"]:
+                collated_annot[key] = torch.tensor([sample[key] for sample in batch])
             else:
                 collated_annot[key] = torch.stack(
                     [sample[key].contiguous() for sample in batch], dim=0
@@ -310,6 +312,7 @@ class InterHand26MSeq(Dataset):
             "joint_cam": joint_cam_tensor,  # [T,J,3]
             "joint_valid": joint_valid_tensor,  # [T,J]
             "joint_rel": joint_rel_tensor,  # [T,J,3]
+            "mano_valid": True,
             "mano_pose": mano_pose_tensor,  # [T,48], flat_hand_mean=False
             "mano_shape": mano_shape_tensor,  # [T,10]
             "timestamp": torch.arange(start=0, end=self.num_frames) * 200,  # [T]
