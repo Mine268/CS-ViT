@@ -459,7 +459,8 @@ class Poser(nn.Module):
         n = 1
         imgs = rearrange(imgs, "b t c h w -> (b t) c h w", b=batch_size, t=num_frames)
         imgs_norm = self.image_preprocessor(imgs)
-        patches = self.backbone(imgs_norm).last_hidden_state[:, 1:]  # [bt,l=64,d] # last_hidden_state如何定义的？
+        start_of_patch = 0 if "swin" in self.backbone_ckpt_dir else 1
+        patches = self.backbone(imgs_norm).last_hidden_state[:, start_of_patch:]
 
         # Perspective feature encode
         # [bt,d]

@@ -21,7 +21,7 @@
         "freihand"
     ],
     "seq_len": 1,
-    "batch_size": 32,
+    "batch_size": 64,
     "ih26mseq_root": "/data_1/datasets_temp/InterHand2.6M_5fps_batch1",
     "ho3d_root": "/data_1/datasets_temp/HO3D_v3",
     "dexycb_root": "/data_1/datasets_temp/dexycb",
