@@ -393,6 +393,9 @@ if __name__ == "__main__":
         help="Type of spatial encoder layer",
         choices=["decoder", "encoder"]
     )
+    parser.add_argument("--num_spatial_layer", type=int, required=False, default=6,
+        help="Number of spatial encoder",
+    )
     parser.add_argument("--temporal_init_method", type=str, required=False, default="zero",
         help="Initialization method for temporal layers",
         choices=["zero", "random"]
