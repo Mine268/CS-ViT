@@ -15,6 +15,7 @@ events.*
 !notebook/*
 *.avi
 out/
+checkpoints/debug_ft
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

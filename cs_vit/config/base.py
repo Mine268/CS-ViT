@@ -12,6 +12,7 @@ class FinetuneConfig():
     # Model
     backbone: str = field(default=None)
     num_joints: int = 16
+    multi_level_feature: bool = False
     num_spatial_layer: int = 6
     global_positioning: str = "direct"
     spatial_layer_type: str = "decoder"
