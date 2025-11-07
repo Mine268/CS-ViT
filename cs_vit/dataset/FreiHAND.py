@@ -14,6 +14,9 @@ import matplotlib.pyplot as plt
 from ..utils.img import crop_tensor_with_square_box, expand_bbox_square
 from ..utils.geometry import rotation_matrix_z, axis_angle_to_matrix, matrix_to_axis_angle
 
+import smplx
+from einops import rearrange
+
 
 def load_json(path):
     with open(path, 'r') as f:
@@ -84,8 +87,12 @@ class FreiHAND(Dataset):
         self.joint_3d = np.array(load_json(os.path.join(self.root, f"{self.data_split}_xyz.json"))) # [N, 21, 3]
         self.mano = np.array(load_json(os.path.join(self.root, f"{self.data_split}_mano.json"))) # [N, 1, 61]
         self.intrinsics = np.array(load_json(os.path.join(self.root, f"{self.data_split}_K.json")))  # [N, 3, 3]
-        # mesh = np.array(load_json(os.path.join(self.root, f"{self.data_split}_verts.json"))) # [N, 778, 3]
-        # scale = np.array(load_json(os.path.join(self.root, f"{self.data_split}_scale.json"))) # [N,]
+        # self.mesh = np.array(load_json(os.path.join(self.root, f"{self.data_split}_verts.json"))) # [N, 778, 3]
+        # self.scale = np.array(load_json(os.path.join(self.root, f"{self.data_split}_scale.json"))) # [N,]
+
+        # prox_phal_length = np.linalg.norm(
+        #     self.joint_3d[:, 9, :] - self.joint_3d[:, 10, :], axis=-1
+        # )
 
         self.joint_2d = project_joint(self.joint_3d, self.intrinsics) # [N ,21, 2]
 
@@ -206,7 +213,7 @@ class FreiHAND(Dataset):
             "joint_cam": joint_cam,  # [T,J,3]
             "joint_valid": joint_valid,  # [T,J]
             "joint_rel": joint_rel,  # [T,J,3]
-            "mano_valid": False,
+            "mano_valid": True,
             "mano_pose": mano_pose,  # [T,48]
             "mano_shape": mano_shape,  # [T,10]
             "timestamp": torch.arange(0, self.num_frames) * 33.33333, # [T]
@@ -220,6 +227,7 @@ class FreiHAND(Dataset):
 
 
 if __name__ == '__main__':
+
     dataset = FreiHAND(
         root="/data_1/jiangyiran/datasets/FreiHAND_pub_v2",
         num_frames=1,
@@ -227,39 +235,85 @@ if __name__ == '__main__':
         img_size=256,
         expansion_ratio= 1.25
     )
-    sample = dataset[38953]
-    tx = 0
 
-    img_cv = cv2.imread(sample["imgs_path"][tx])
-    if sample["flip"]:
-        img_cv = img_cv[:, ::-1].copy()
-    img = torch.from_numpy(img_cv[:, :, ::-1].copy()).permute(2,0,1)[None] / 255
-    rot_rad = sample["rot_rad"][tx].item()
+    smplx_path = "/data_1/jiangyiran/CS-ViT/model/smplx_models"
+    rmano_layer = smplx.create(smplx_path, "mano", is_rhand=True, use_pca=False)
+    rmano_layer.requires_grad_(False)
+    rmano_layer.eval()
+    J_regressor_mano = np.load("/data_1/jiangyiran/CS-ViT/cs_vit/net/sh_joint_regressor.npy")
+    J_regressor_mano = torch.from_numpy(J_regressor_mano).type(torch.float32) # [21, 778]
 
-    intr = torch.zeros(size=(7,3,3))
-    intr[:, 0, 0] = sample["focal"][:, 0]
-    intr[:, 1, 1] = sample["focal"][:, 1]
-    intr[:, 0, 2] = sample["princpt"][:, 0]
-    intr[:, 1, 2] = sample["princpt"][:, 1]
-    intr[:, 2, 2] = 1
+    for idx in range(0, 20):
+        sample = dataset[idx]
+        tx = 0
 
-    print(rot_rad / torch.pi * 180)
+        img_cv = cv2.imread(sample["imgs_path"][tx])
+        if sample["flip"]:
+            img_cv = img_cv[:, ::-1].copy()
+        img = torch.from_numpy(img_cv[:, :, ::-1].copy()).permute(2,0,1)[None] / 255
+        rot_rad = sample["rot_rad"][tx].item()
 
-    joint_3d = sample["joint_cam"]
-    joint_proj = joint_3d @ intr.transpose(-1, -2)
-    joint_proj = joint_proj[:, :, :2] / joint_proj[:, :, 2:]
+        intr = torch.zeros(size=(1,3,3))
+        intr[:, 0, 0] = sample["focal"][:, 0]
+        intr[:, 1, 1] = sample["focal"][:, 1]
+        intr[:, 0, 2] = sample["princpt"][:, 0]
+        intr[:, 1, 2] = sample["princpt"][:, 1]
+        intr[:, 2, 2] = 1
 
-    img_rot = K.rotate(img, angle=sample["rot_rad"][tx:tx+1]/torch.pi*180, center=sample["princpt"][tx:tx+1])[0]
+        print(rot_rad / torch.pi * 180)
 
-    plt.imshow(img_rot.permute(1, 2, 0))
-    plt.scatter(sample["joint_img"][tx, :, 0], sample["joint_img"][tx, :, 1], s=2)
-    plt.scatter(joint_proj[tx, :, 0], joint_proj[tx, :, 1], s=2)
-    plt.savefig("/data_1/jiangyiran/CS-ViT/tests/freihand/img_rot_joints.png")
-    plt.close()
+        # joint_3d = sample["joint_cam"]
+        # joint_proj = joint_3d @ intr.transpose(-1, -2)
+        # joint_proj = joint_proj[:, :, :2] / joint_proj[:, :, 2:]
 
-    xm, ym, xM, yM = sample["square_bboxes"][tx].int()
-    img_crop = img_rot.permute(1,2,0)[ym:yM, xm:xM].cpu().numpy()
-    plt.imsave("/data_1/jiangyiran/CS-ViT/tests/freihand/img_crop_bbox.png", img_crop)
+        # img_rot = K.rotate(img, angle=sample["rot_rad"][tx:tx+1]/torch.pi*180, center=sample["princpt"][tx:tx+1])[0]
 
-    patch_img = sample["patches"][tx].permute(1,2,0).cpu().numpy()
-    plt.imsave( "/data_1/jiangyiran/CS-ViT/tests/freihand/img_patch.png", patch_img)
+        # plt.imshow(img_rot.permute(1, 2, 0))
+        # plt.scatter(sample["joint_img"][tx, :, 0], sample["joint_img"][tx, :, 1], s=2)
+        # plt.scatter(joint_proj[tx, :, 0], joint_proj[tx, :, 1], s=2)
+        # plt.savefig("/data_1/jiangyiran/CS-ViT/tests/freihand/img_rot_joints.png")
+        # plt.close()
+
+        # xm, ym, xM, yM = sample["square_bboxes"][tx].int()
+        # img_crop = img_rot.permute(1,2,0)[ym:yM, xm:xM].cpu().numpy()
+        # plt.imsave("/data_1/jiangyiran/CS-ViT/tests/freihand/img_crop_bbox.png", img_crop)
+
+        # patch_img = sample["patches"][tx].permute(1,2,0).cpu().numpy()
+        # plt.imsave( "/data_1/jiangyiran/CS-ViT/tests/freihand/img_patch.png", patch_img)
+
+        pose_aa = rearrange(sample["mano_pose"], "t (j d) -> t j d", d=3) # [T, J, 3]
+        shape = sample["mano_shape"] # [T, 10]
+        root_transl = sample["joint_cam"][:, 0] # [T, 3]
+
+        _, J1, _ = pose_aa.shape # J
+        J2 = J_regressor_mano.shape[0] # 要回归出的关节数
+        # shape = rearrange(shape, "t d -> t d")
+        pose_aa = rearrange(pose_aa, "t j d -> t (j d)")
+
+        mano_output = rmano_layer(
+            betas=shape,
+            global_orient=pose_aa[:, :3],
+            hand_pose=pose_aa[:, 3:],
+            transl=torch.zeros(size=(pose_aa.shape[0], 3), device=pose_aa.device)
+        )
+
+        # shape = rearrange(shape, "t d -> t d")
+        pose_aa = rearrange(pose_aa, "t (j d) -> t j d", j=J1)
+
+        joints_mano = torch.einsum(
+            "nvd,jv->njd",
+            mano_output.vertices, J_regressor_mano # [1, 778, 3], [21, 778]
+        ) # [1, 21, 3]
+
+        # [B,T,V,3]
+        verts_cam = (mano_output.vertices - joints_mano[:, :1]) * 1e3  + root_transl[:, None] # [1, 778, 3]
+        verts_proj = verts_cam @ intr.transpose(-1, -2)
+        verts_proj = verts_proj[:, :, :2] / verts_proj[:, :, 2:]
+
+        img_rot = K.rotate(img, angle=sample["rot_rad"][tx:tx+1]/torch.pi*180, center=sample["princpt"][tx:tx+1])[0]
+
+        plt.imshow(img_rot.permute(1, 2, 0))
+        plt.scatter(sample["joint_img"][tx, :, 0], sample["joint_img"][tx, :, 1], s=2)
+        plt.scatter(verts_proj[tx, :, 0], verts_proj[tx, :, 1], s=2)
+        plt.savefig(f"/data_1/jiangyiran/CS-ViT/tests/freihand/img_rot_verts_{idx}.png")
+        plt.close()

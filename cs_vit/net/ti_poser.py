@@ -1,8 +1,10 @@
 from typing import *
 from einops import rearrange
+from einops.layers.torch import Rearrange
 import os.path as osp
 from enum import Enum
 from itertools import chain
+import math
 
 import cv2
 import numpy as np
@@ -223,6 +225,7 @@ class Poser(nn.Module):
         # basic setup
         backbone: str, # swin transformer？
         num_pose_query: int = 16,
+        multi_level_feature: bool = False,
         num_spatial_layer: int = 6,
         spatial_layer_type: str = "decoder",
         num_temporal_layer: int = 2,
@@ -250,6 +253,10 @@ class Poser(nn.Module):
 
         self.backbone_ckpt_dir = backbone
         self.num_pose_query = num_pose_query
+        self.multi_level_feature = multi_level_feature
+        self.multi_levels = (
+            [2, 4, 8, 11] if "dino" in self.backbone_ckpt_dir else [1, 2, 3, 4]
+        )
         self.num_spatial_layer = num_spatial_layer
         self.spatial_layer_type = spatial_layer_type
         self.num_temporal_layer = num_temporal_layer
@@ -322,6 +329,46 @@ class Poser(nn.Module):
             self.perspective_mlp = PerspectiveEncoder(4, 2, self.hidden_dim)
 
         # Spatial encoder
+        if self.multi_level_feature:
+            if "dino" in self.backbone_ckpt_dir:
+                self.multi_level_proj = nn.ModuleList(
+                    [
+                        nn.Sequential(
+                            nn.Conv2d(
+                                in_channels=self.hidden_dim,
+                                out_channels=768,
+                                kernel_size=1,
+                                stride=1,
+                                padding=0,
+                            ),
+                            nn.GELU()
+                        )
+                        for _ in self.multi_levels
+                    ]
+                )
+            else:  # swin
+                self.multi_level_proj = nn.ModuleList(
+                    [
+                        nn.Sequential(
+                            nn.Conv2d(
+                                in_channels=d,
+                                out_channels=768,
+                                kernel_size=int(p / 8),
+                                stride=int(p / 8),
+                                padding=0,
+                            ),
+                            nn.GELU()
+                        )
+                        for (p, d) in zip([32, 16, 8, 8], [256, 512, 1024, 1024])
+                    ]
+                )
+            self.multi_level_conv = nn.Conv2d(
+                in_channels=4 * 768,
+                out_channels=self.hidden_dim,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            )
         self.spatial_encoder = SpatialEncoder(
             self.hidden_dim,
             self.num_heads,
@@ -432,6 +479,11 @@ class Poser(nn.Module):
             for param in self.parameters():
                 param.requires_grad_(False)
 
+        # if toggle multi level feature, freeze backbone
+        if self.multi_level_feature:
+            self.backbone.eval()
+            self.backbone.requires_grad_(False)
+
     def _extract_spatial_patches(self, x: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
         for module in self.spatial_encoder:
             x = module(x, ref)
@@ -459,8 +511,36 @@ class Poser(nn.Module):
         n = 1
         imgs = rearrange(imgs, "b t c h w -> (b t) c h w", b=batch_size, t=num_frames)
         imgs_norm = self.image_preprocessor(imgs)
-        start_of_patch = 0 if "swin" in self.backbone_ckpt_dir else 1
-        patches = self.backbone(imgs_norm).last_hidden_state[:, start_of_patch:]
+        if not self.multi_level_feature:
+            start_of_patch = 0 if "swin" in self.backbone_ckpt_dir else 1
+            patches = self.backbone(imgs_norm).last_hidden_state[:, start_of_patch:]
+        elif "dino" in self.backbone_ckpt_dir:
+            multi_feats = self.backbone(imgs_norm, output_hidden_states=True).hidden_states
+            outs = []
+            for i, l in enumerate(self.multi_levels):
+                temp = rearrange(
+                    multi_feats[l][:, 1:], "b (p q) d -> b d p q", p=self.num_p
+                )  # drop cls
+                temp = self.multi_level_proj[i](temp)
+                outs.append(temp)
+            out_feats = torch.cat(outs, dim=1)
+            out_feats = self.multi_level_conv(out_feats)
+            patches = rearrange(out_feats, "b d p q -> b (p q) d")
+        else:  # swin
+            multi_feats = self.backbone(imgs_norm, output_hidden_states=True).hidden_states
+            outs = []
+            for i, l in enumerate(self.multi_levels):
+                edge = int(math.sqrt(multi_feats[l].shape[1]))
+                temp = rearrange(
+                    multi_feats[l],
+                    "b (p q) d -> b d p q",
+                    p=edge,
+                )  # drop cls
+                temp = self.multi_level_proj[i](temp)
+                outs.append(temp)
+            out_feats = torch.cat(outs, dim=1)
+            out_feats = self.multi_level_conv(out_feats)
+            patches = rearrange(out_feats, "b d p q -> b (p q) d")
 
         # Perspective feature encode
         # [bt,d]

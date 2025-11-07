@@ -125,6 +125,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     model = Poser(
         backbone=cfg.backbone,
         num_pose_query=cfg.num_joints,
+        multi_level_feature=cfg.multi_level_feature,
         num_spatial_layer=cfg.num_spatial_layer,
         spatial_layer_type=cfg.spatial_layer_type,
         num_temporal_layer=cfg.num_temporal_layer,
@@ -388,6 +389,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_latent_layer", type=int, required=False, default=None,
         help="if None, no latent constraints applied"
+    )
+    parser.add_argument(
+        "--multi_level_feature",
+        action="store_true",
+        help="Enable multi-level feature fusion for DINO backbone",
     )
     parser.add_argument("--spatial_layer_type", type=str, required=False, default="decoder",
         help="Type of spatial encoder layer",
