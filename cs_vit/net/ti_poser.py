@@ -220,6 +220,20 @@ class Poser(nn.Module):
         TEMPORAL = "temporal"
         INFERENCE = "inference"
 
+    def get_num_p_from_backbone_dir(self):
+        if "swin" in self.backbone_ckpt_dir:
+            return self.image_size // 32
+        if "dino" in self.backbone_ckpt_dir:
+            return self.image_size // self.backbone.config.patch_size
+        if "resnet-50" in self.backbone_ckpt_dir:
+            return self.image_size // 32
+
+    def get_hidden_dim(self):
+        if "resnet-50" in self.backbone_ckpt_dir:
+            return self.backbone.config.hidden_sizes[-1]
+        else:
+            return self.backbone.config.hidden_size
+
     def __init__(
         self,
         # basic setup
@@ -282,17 +296,14 @@ class Poser(nn.Module):
 
         # backbone
         self.backbone = transformers.AutoModel.from_pretrained(self.backbone_ckpt_dir)
-        self.hidden_dim = self.backbone.config.hidden_size
+        self.hidden_dim = self.get_hidden_dim()
         self.num_heads = (
             self.backbone.config.num_heads[-1]
             if isinstance(self.backbone.config.num_heads, list)
             else self.backbone.config.num_heads
         ) if hasattr(self.backbone.config, "num_heads") else 8
-        self.num_p = (
-            self.image_size // 32
-            if "swin" in self.backbone_ckpt_dir
-            else self.image_size // self.backbone.config.patch_size
-        )
+        self.num_p = self.get_num_p_from_backbone_dir()
+        self.start_of_patch = 1 if "dino" in self.backbone_ckpt_dir else 0
 
         # latent transformer
         if self.num_latent_layer is not None:
@@ -348,7 +359,7 @@ class Poser(nn.Module):
                         for _ in self.multi_levels
                     ]
                 )
-            else:  # swin
+            elif "swin" in self.backbone_ckpt_dir:  # swin
                 self.multi_level_proj = nn.ModuleList(
                     [
                         nn.Sequential(
@@ -364,6 +375,8 @@ class Poser(nn.Module):
                         for (p, d) in zip([32, 16, 8, 8], [256, 512, 1024, 1024])
                     ]
                 )
+            else:
+                raise "Unkown multi-level-feature strategy for " + self.backbone_ckpt_dir
             self.multi_level_conv = nn.Conv2d(
                 in_channels=4 * 768,
                 out_channels=self.hidden_dim,
@@ -513,9 +526,12 @@ class Poser(nn.Module):
         n = 1
         imgs = rearrange(imgs, "b t c h w -> (b t) c h w", b=batch_size, t=num_frames)
         imgs_norm = self.image_preprocessor(imgs)
+
         if not self.multi_level_feature:
-            start_of_patch = 0 if "swin" in self.backbone_ckpt_dir else 1
-            patches = self.backbone(imgs_norm).last_hidden_state[:, start_of_patch:]
+            patches = self.backbone(imgs_norm).last_hidden_state
+            if "resnet-50" in self.backbone_ckpt_dir:
+                patches = rearrange(patches, "b d h w -> b (h w) d")
+            patches = patches[:, self.start_of_patch:]
         elif "dino" in self.backbone_ckpt_dir:
             multi_feats = self.backbone(imgs_norm, output_hidden_states=True).hidden_states
             outs = []
@@ -528,7 +544,7 @@ class Poser(nn.Module):
             out_feats = torch.cat(outs, dim=1)
             out_feats = self.multi_level_conv(out_feats)
             patches = rearrange(out_feats, "b d p q -> b (p q) d")
-        else:  # swin
+        elif "swin" in self.backbone_ckpt_dir:  # swin
             multi_feats = self.backbone(imgs_norm, output_hidden_states=True).hidden_states
             outs = []
             for i, l in enumerate(self.multi_levels):

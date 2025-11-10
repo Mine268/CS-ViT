@@ -140,11 +140,14 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         image_size=cfg.img_size,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
-    if cfg.phase == "temporal":
-        if cfg.spatial_ckpt is not None: # 加载spatial阶段的权重
-            model.load_state_dict(torch.load(cfg.spatial_ckpt)["merged"], strict=False) # merge
-        else:
-            print_(f"No checkpoint is set in temporal phase.")
+    # if cfg.phase == "temporal":
+    if cfg.spatial_ckpt is not None: # 加载spatial阶段的权重
+        missing, unexpected = model.load_state_dict(
+            torch.load(cfg.spatial_ckpt)["merged"], strict=False
+        )  # merge
+        print_("spatial checkpoint loaded")
+        print_(f"missing: {missing}")
+        print_(f"unexpected: {unexpected}")
     model.to(rank)
     model = DistributedDataParallel(
         model, device_ids=[rank], output_device=rank, find_unused_parameters=True
@@ -448,7 +451,7 @@ if __name__ == "__main__":
     cfg = deepcopy(default_finetune_cfg)
     if "swin" in args.backbone:
         cfg.img_size = 256
-    elif "dino" in args.backbone:
+    elif "dino" in args.backbone or "resnet-50" in args.backbone:
         cfg.img_size = 224
 
     ddp_setup()
