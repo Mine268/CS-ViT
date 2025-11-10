@@ -11,6 +11,7 @@ class FinetuneConfig():
 
     # Model
     backbone: str = field(default=None)
+    freeze_backbone: bool = False
     num_joints: int = 16
     multi_level_feature: bool = False
     num_spatial_layer: int = 6

@@ -1,11 +1,10 @@
 {
-    "exp": "spatial_freiahdn_swinb_multi_spatial3_20251107-2",
+    "exp": "spatial_freiahdn_swinb_multi_spatial1_ftbb_20251108-2",
     "epoch": 10,
     "backbone": "model/microsoft/swinv2-base-patch4-window16-256",
-    "freeze_backbone": true,
     "num_joints": 16,
     "multi_level_feature": true,
-    "num_spatial_layer": 3,
+    "num_spatial_layer": 1,
     "global_positioning": null,
     "spatial_layer_type": "encoder",
     "num_temporal_layer": 2,
@@ -20,7 +19,7 @@
         "freihand"
     ],
     "seq_len": 1,
-    "batch_size": 64,
+    "batch_size": 32,
     "ih26mseq_root": "/data_1/datasets_temp/InterHand2.6M_5fps_batch1",
     "ho3d_root": "/data_1/datasets_temp/HO3D_v3",
     "dexycb_root": "/data_1/datasets_temp/dexycb",

@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import numpy as np
 
-from cs_vit.net import Poser, warmup_scheduler
+from cs_vit.net import Poser, warmup_annealing_scheduler, warmup_constant_scheduler
 from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB, FreiHAND
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
@@ -124,6 +124,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     # 2. setup model
     model = Poser(
         backbone=cfg.backbone,
+        freeze_backbone=cfg.freeze_backbone,
         num_pose_query=cfg.num_joints,
         multi_level_feature=cfg.multi_level_feature,
         num_spatial_layer=cfg.num_spatial_layer,
@@ -163,7 +164,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     )
     in_epoch_scheduler: bool = False
     if cfg.lr_scheduler == "warmup":
-        scheduler = warmup_scheduler(
+        scheduler = warmup_annealing_scheduler(
             optimizer=optimizer,
             max_lr=max_lr,
             min_lr=min_lr,
@@ -172,7 +173,16 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
             steps_per_epoch=len(dataloader),
         )
         in_epoch_scheduler = True # 每个step/batch更新
-    elif cfg.lr_scheduler == "constant":
+    elif cfg.lr_scheduler == "warmup_constant":
+        scheduler = warmup_constant_scheduler(
+            optimizer=optimizer,
+            max_lr=max_lr,
+            min_lr=min_lr,
+            warmup_epochs=cfg.warmup_epoch,
+            steps_per_epoch=len(dataloader),
+        )
+        in_epoch_scheduler = True # 每个step/batch更新
+    else:  # cfg.lr_scheduler == "constant":
         scheduler = scheduler
         in_epoch_scheduler = None
 
@@ -383,6 +393,9 @@ if __name__ == "__main__":
     parser.add_argument("--backbone", type=str, required=True,
         help="Backbone path (huggingface checkpoint)"
     )
+    parser.add_argument(
+        "--freeze_backbone", action="store_true", help="Disable backbone finetune."
+    )
     parser.add_argument("--global_positioning", type=str, required=False,
         help="Directly regress the global position, or by orientation",
         choices=["direct", "orientation"]
@@ -426,7 +439,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr_min", type=float, required=False, default=1e-6)
     parser.add_argument("--lr_scheduler", type=str, required=False, default="warmup",
         help="Learning rate scheduler",
-        choices=["warmup", "constant"]
+        choices=["warmup", "constant", "warmup_constant"]
     )
 
     args = parser.parse_args()

@@ -24,7 +24,7 @@ def gen_cosine_scheduler_array(
     return schedule
 
 
-def warmup_scheduler(
+def warmup_annealing_scheduler(
     optimizer: torch.optim.Optimizer,
     max_lr: float,
     min_lr: float,
@@ -56,5 +56,32 @@ def warmup_scheduler(
 
         # constant
         return min_lr / max_lr
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=-1)
+
+
+def warmup_constant_scheduler(
+    optimizer: torch.optim.Optimizer,
+    max_lr: float,
+    min_lr: float,
+    warmup_epochs: int,
+    steps_per_epoch: int,
+) -> LambdaLR:
+    """Warmup lr scheduler."""
+    assert warmup_epochs >= 0, "warmup_epochs>=0"
+    assert max_lr > min_lr >= 0.0, "max_lr>min_lr>=0.0"
+    assert steps_per_epoch > 0
+
+    warmup_steps = warmup_epochs * steps_per_epoch
+
+    def lr_lambda(current_step: int) -> float:
+        # linear increase
+        if current_step < warmup_steps:
+            if warmup_steps == 0:
+                return 1.0
+            return current_step / warmup_steps
+        # constant
+        else:
+            return 1.0
 
     return LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=-1)

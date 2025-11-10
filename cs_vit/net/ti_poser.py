@@ -224,6 +224,7 @@ class Poser(nn.Module):
         self,
         # basic setup
         backbone: str, # swin transformer？
+        freeze_backbone: bool = True,
         num_pose_query: int = 16,
         multi_level_feature: bool = False,
         num_spatial_layer: int = 6,
@@ -252,6 +253,7 @@ class Poser(nn.Module):
         assert global_positioning in ["direct", "orientation"] # 直接采用图片 vs. 对图片进行旋转？
 
         self.backbone_ckpt_dir = backbone
+        self.freeze_backbone = freeze_backbone
         self.num_pose_query = num_pose_query
         self.multi_level_feature = multi_level_feature
         self.multi_levels = (
@@ -480,7 +482,7 @@ class Poser(nn.Module):
                 param.requires_grad_(False)
 
         # if toggle multi level feature, freeze backbone
-        if self.multi_level_feature:
+        if self.freeze_backbone:
             self.backbone.eval()
             self.backbone.requires_grad_(False)
 
