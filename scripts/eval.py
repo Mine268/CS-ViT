@@ -16,7 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.utils import make_grid
 import numpy as np
 
-from cs_vit.net import Poser, warmup_scheduler
+from cs_vit.net import Poser, warmup_annealing_scheduler
 from cs_vit.dataset import InterHand26MSeq, HO3D, DexYCB, FreiHAND
 from cs_vit.config import *
 from cs_vit.utils.misc import move_to_device, flatten_dict, wrap_prefix_print, print_grouped_losses
@@ -143,9 +143,11 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     )
 
     # 2. setup model
-    model: Poser = Poser(
+    model = Poser(
         backbone=cfg.backbone,
+        freeze_backbone=cfg.freeze_backbone,
         num_pose_query=cfg.num_joints,
+        multi_level_feature=cfg.multi_level_feature,
         num_spatial_layer=cfg.num_spatial_layer,
         spatial_layer_type=cfg.spatial_layer_type,
         num_temporal_layer=cfg.num_temporal_layer,
@@ -153,9 +155,10 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
         expansion_ratio=cfg.expansion_ratio,
         temporal_supervision=cfg.temporal_supervision,
         trope_scalar=cfg.trope_scalar,
-        num_latent_layer=None,  # cfg.num_latent_layer,
+        num_latent_layer=None,  # Disable TIS in evaluation
         persp_embed_method=cfg.persp_embed_method,
         persp_decorate=cfg.persp_decorate,
+        image_size=cfg.img_size,
     )
     model.phase(Poser.TrainingPhase(cfg.phase))
     model.load_state_dict(torch.load(cfg.eval_ckpt, map_location="cpu")["merged"], strict=False)
@@ -179,7 +182,7 @@ def setup(rank: int, cfg: FinetuneConfig, print_: Callable = print):
     )
     in_epoch_scheduler: bool = False
     if cfg.lr_scheduler == "warmup":
-        scheduler = warmup_scheduler(
+        scheduler = warmup_annealing_scheduler(
             optimizer=optimizer,
             max_lr=max_lr,
             min_lr=min_lr,
