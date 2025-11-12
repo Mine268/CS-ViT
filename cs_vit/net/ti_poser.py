@@ -1000,7 +1000,7 @@ class Poser(nn.Module):
 
         # loss
         loss_origin, origin_dict = self._criterion(predict_origin, batch)
-        loss = loss_origin
+        loss = torch.clone(loss_origin)
 
         loss_trans, trans_dict = torch.tensor(0.0, device=loss.device), {}
         if self.latent_trans is not None:

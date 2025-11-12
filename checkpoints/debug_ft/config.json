@@ -13,7 +13,7 @@
     "img_size": 256,
     "expansion_ratio": 1.25,
     "trope_scalar": 20.0,
-    "num_latent_layer": null,
+    "num_latent_layer": 3,
     "persp_embed_method": "dense",
     "persp_decorate": "patch",
     "data": [
