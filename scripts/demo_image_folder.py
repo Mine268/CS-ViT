@@ -197,6 +197,7 @@ def detect_hand_with_mediapipe(img_path: str):
         return [float(x1), float(y1), float(x2), float(y2)], handedness
 
 
+# TODO: better CLI
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp", required=True)
@@ -219,88 +220,100 @@ def main():
 
     cfg, model = load_cfg_and_model(args.exp, args.ckpt, device)
 
-    # detect bbox & handedness with MediaPipe (assume single hand in image)
-    bbox_det, handedness = detect_hand_with_mediapipe(args.img)
-    if bbox_det is None:
-        raise RuntimeError("No hand detected by MediaPipe in the input image")
+    rmano_layer = smplx.create("model/smplx_models", "mano", is_rhand=True, use_pca=False)
+    for i in range(24, 241):
+        img_path = f"render/V0/{i:06d}.bmp"
+        # detect bbox & handedness with MediaPipe (assume single hand in image)
+        bbox_det, handedness = detect_hand_with_mediapipe(img_path)
+        if bbox_det is None:
+            print("No hand detected by MediaPipe in the input image")
+            continue
 
-    print(f"MediaPipe detection bbox={bbox_det}, handedness={handedness}")
+        print(f"MediaPipe detection bbox={bbox_det}, handedness={handedness}")
 
-    patches, square_bboxes, img_rgb = preprocess_image(args.img, bbox_det, cfg, handedness=handedness)
+        patches, square_bboxes, img_rgb = preprocess_image(img_path, bbox_det, cfg, handedness=handedness)
 
-    # model expects inputs in batch where B dimension corresponds to batch-size, and temporal dimension T;
-    # here patches has shape [B=1,T=1,C,H,W] or [1,1,C,H,W] depending on crop function.
-    # Ensure tensors are on device and dtype float32
-    patches = patches.to(device=device, dtype=torch.float32)
-    square_bboxes = square_bboxes.to(device=device, dtype=torch.float32)
+        # model expects inputs in batch where B dimension corresponds to batch-size, and temporal dimension T;
+        # here patches has shape [B=1,T=1,C,H,W] or [1,1,C,H,W] depending on crop function.
+        # Ensure tensors are on device and dtype float32
+        patches = patches.to(device=device, dtype=torch.float32)
+        square_bboxes = square_bboxes.to(device=device, dtype=torch.float32)
 
-    B, T, C, H, W = patches.shape
+        B, T, C, H, W = patches.shape
 
-    # timestamp: shape [B,T], all zeros
-    timestamp = torch.zeros((B, T), dtype=torch.float32, device=device)
+        # timestamp: shape [B,T], all zeros
+        timestamp = torch.zeros((B, T), dtype=torch.float32, device=device)
 
-    # focal/princpt: from CLI or default
-    if args.focal is not None:
-        focal = (
-            torch.tensor(args.focal, dtype=torch.float32, device=device)
-            .unsqueeze(0)
-            .repeat(B, T, 1)
-        )  # [B,T,2]
-    else:
-        focal = (
-            torch.tensor([max(W, H), max(W, H)], dtype=torch.float32, device=device)
-            .unsqueeze(0)
-            .repeat(B, T, 1)
+        # focal/princpt: from CLI or default
+        if args.focal is not None:
+            focal = (
+                torch.tensor(args.focal, dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .repeat(B, T, 1)
+            )  # [B,T,2]
+        else:
+            focal = (
+                torch.tensor([max(W, H), max(W, H)], dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .repeat(B, T, 1)
+            )
+        if args.princpt is not None:
+            princpt = (
+                torch.tensor(args.princpt, dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .repeat(B, T, 1)
+            )  # [B,T,2]
+        else:
+            princpt = (
+                torch.tensor([W / 2.0, H / 2.0], dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .repeat(B, T, 1)
+            )
+
+        # If left handed and original image was flipped in preprocess, adjust principal point x: princpt_x = W - princpt_x
+        if handedness == 'l':
+            princpt[..., 0] = W - princpt[..., 0]
+
+        with torch.inference_mode():
+            predict = model.predict_batch(
+                img_tensor=patches,
+                square_bboxes=square_bboxes,
+                timestamp=timestamp,
+                focal=focal,
+                princpt=princpt,
+            )
+
+        # get predicted joint reprojection in pixel coords on the patch
+        joint_cam = predict['joint_cam'][0, -1].cpu().numpy()  # [J,3]
+        # Use focal/princpt from input
+        fx, fy = float(focal[0, -1, 0].cpu()), float(focal[0, -1, 1].cpu())
+        cx, cy = float(princpt[0, -1, 0].cpu()), float(princpt[0, -1, 1].cpu())
+
+        u = (fx * joint_cam[:, 0] + cx * joint_cam[:, 2]) / joint_cam[:, 2]
+        v = (fy * joint_cam[:, 1] + cy * joint_cam[:, 2]) / joint_cam[:, 2]
+        reproj_uv = np.stack([u, v], axis=-1)
+
+        # If left hand, the image was flipped during preprocessing, so un-flip x coordinates back to original image space
+        if handedness == 'l':
+            H_img, W_img = img_rgb.shape[:2]
+            reproj_uv[:, 0] = W_img - reproj_uv[:, 0]
+
+        visualize_and_save(
+            img_rgb,
+            reproj_uv,
+            f"out/{i:06d}.png",
+            mediapipe_bbox=bbox_det,
+            mediapipe_handedness=handedness,
         )
-    if args.princpt is not None:
-        princpt = (
-            torch.tensor(args.princpt, dtype=torch.float32, device=device)
-            .unsqueeze(0)
-            .repeat(B, T, 1)
-        )  # [B,T,2]
-    else:
-        princpt = (
-            torch.tensor([W / 2.0, H / 2.0], dtype=torch.float32, device=device)
-            .unsqueeze(0)
-            .repeat(B, T, 1)
-        )
 
-    # If left handed and original image was flipped in preprocess, adjust principal point x: princpt_x = W - princpt_x
-    if handedness == 'l':
-        princpt[..., 0] = W - princpt[..., 0]
+        mesh_np = predict["verts_cam"][0, -1].detach().cpu().numpy()
+        mesh = o3d.geometry.TriangleMesh()
+        mesh.vertices = o3d.utility.Vector3dVector(mesh_np)
+        mesh.triangles = o3d.utility.Vector3iVector(rmano_layer.faces)
+        mesh.paint_uniform_color((1.0, 0.0, 0.0))
+        mesh.compute_vertex_normals()
 
-    with torch.inference_mode():
-        predict = model.predict_batch(
-            img_tensor=patches,
-            square_bboxes=square_bboxes,
-            timestamp=timestamp,
-            focal=focal,
-            princpt=princpt,
-        )
-
-    # get predicted joint reprojection in pixel coords on the patch
-    joint_cam = predict['joint_cam'][0, -1].cpu().numpy()  # [J,3]
-    # Use focal/princpt from input
-    fx, fy = float(focal[0, -1, 0].cpu()), float(focal[0, -1, 1].cpu())
-    cx, cy = float(princpt[0, -1, 0].cpu()), float(princpt[0, -1, 1].cpu())
-
-    u = (fx * joint_cam[:, 0] + cx * joint_cam[:, 2]) / joint_cam[:, 2]
-    v = (fy * joint_cam[:, 1] + cy * joint_cam[:, 2]) / joint_cam[:, 2]
-    reproj_uv = np.stack([u, v], axis=-1)
-
-    # If left hand, the image was flipped during preprocessing, so un-flip x coordinates back to original image space
-    if handedness == 'l':
-        H_img, W_img = img_rgb.shape[:2]
-        reproj_uv[:, 0] = W_img - reproj_uv[:, 0]
-
-    visualize_and_save(
-        img_rgb,
-        reproj_uv,
-        args.out,
-        mediapipe_bbox=bbox_det,
-        mediapipe_handedness=handedness,
-    )
-    print(f"Saved visualization to {args.out}")
+        o3d.io.write_triangle_mesh(f"out/{i:06d}.ply", mesh)
 
 
 if __name__ == '__main__':
